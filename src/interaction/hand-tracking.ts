@@ -61,14 +61,30 @@ const PINCH_THRESHOLD = 0.032;
 /** Hysteresis: pinch releases when distance exceeds this. */
 const PINCH_RELEASE_THRESHOLD = 0.055;
 
+/**
+ * Point gesture: index finger extended while middle/ring/pinky curled.
+ * Detected via wrist-to-tip distance ratio: index vs average of others.
+ */
+const POINT_RATIO_THRESHOLD = 1.55;
+const POINT_RATIO_RELEASE = 1.3;
+
 interface PinchState {
   pinching: boolean;
+}
+
+interface PointState {
+  pointing: boolean;
 }
 
 export class HandTracker {
   private readonly pinchStates: Record<Handedness, PinchState> = {
     left: { pinching: false },
     right: { pinching: false },
+  };
+
+  private readonly pointStates: Record<Handedness, PointState> = {
+    left: { pointing: false },
+    right: { pointing: false },
   };
 
   /**
@@ -88,8 +104,13 @@ export class HandTracker {
 
       const handedness = source.handedness as Handedness;
       const joints: HandJoint[] = [];
+      let wristPos: Vector3Like | null = null;
       let thumbTip: Vector3Like | null = null;
       let indexTip: Vector3Like | null = null;
+      let indexDistal: Vector3Like | null = null;
+      let middleTip: Vector3Like | null = null;
+      let ringTip: Vector3Like | null = null;
+      let pinkyTip: Vector3Like | null = null;
 
       for (const jointName of TRACKED_JOINTS) {
         const jointSpace = source.hand.get(jointName);
@@ -110,15 +131,20 @@ export class HandTracker {
           radius: pose.radius,
         });
 
+        if (jointName === "wrist") wristPos = pos;
         if (jointName === "thumb-tip") thumbTip = pos;
         if (jointName === "index-finger-tip") indexTip = pos;
+        if (jointName === "index-finger-phalanx-distal") indexDistal = pos;
+        if (jointName === "middle-finger-tip") middleTip = pos;
+        if (jointName === "ring-finger-tip") ringTip = pos;
+        if (jointName === "pinky-finger-tip") pinkyTip = pos;
       }
 
       if (joints.length === 0) continue;
 
       // Pinch detection
-      const state = this.pinchStates[handedness];
-      let pinching = state.pinching;
+      const pinchState = this.pinchStates[handedness];
+      let pinching = pinchState.pinching;
       let pinchStrength = 0;
       let pinchPoint: Vector3Like = { x: 0, y: 0, z: 0 };
 
@@ -139,8 +165,49 @@ export class HandTracker {
         };
       }
 
-      const prevPinching = state.pinching;
-      state.pinching = pinching;
+      const prevPinching = pinchState.pinching;
+      pinchState.pinching = pinching;
+
+      // Point gesture detection: index extended, others curled
+      const pointState = this.pointStates[handedness];
+      let pointing = pointState.pointing;
+      let pointStrength = 0;
+      let pointOrigin: Vector3Like = { x: 0, y: 0, z: 0 };
+      let pointDirection: Vector3Like = { x: 0, y: 0, z: -1 };
+
+      if (wristPos && indexTip && middleTip && ringTip && pinkyTip) {
+        const indexDist = distance(wristPos, indexTip);
+        const middleDist = distance(wristPos, middleTip);
+        const ringDist = distance(wristPos, ringTip);
+        const pinkyDist = distance(wristPos, pinkyTip);
+        const avgOtherDist = (middleDist + ringDist + pinkyDist) / 3;
+
+        const ratio = avgOtherDist > 0.001 ? indexDist / avgOtherDist : 0;
+        pointStrength = Math.max(0, Math.min(1, (ratio - POINT_RATIO_RELEASE) / (POINT_RATIO_THRESHOLD - POINT_RATIO_RELEASE)));
+
+        if (!pointing && ratio > POINT_RATIO_THRESHOLD) {
+          pointing = true;
+        } else if (pointing && ratio < POINT_RATIO_RELEASE) {
+          pointing = false;
+        }
+
+        if (indexTip) {
+          pointOrigin = { x: indexTip.x, y: indexTip.y, z: indexTip.z };
+        }
+
+        if (indexDistal && indexTip) {
+          const dx = indexTip.x - indexDistal.x;
+          const dy = indexTip.y - indexDistal.y;
+          const dz = indexTip.z - indexDistal.z;
+          const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+          if (len > 0.001) {
+            pointDirection = { x: dx / len, y: dy / len, z: dz / len };
+          }
+        }
+      }
+
+      const prevPointing = pointState.pointing;
+      pointState.pointing = pointing;
 
       results.push({
         hand: handedness,
@@ -148,9 +215,15 @@ export class HandTracker {
         pinching,
         pinchStrength,
         pinchPoint,
+        pointing,
+        pointStrength,
+        pointOrigin,
+        pointDirection,
         _pinchChanged: pinching !== prevPinching,
         _prevPinching: prevPinching,
-      } as HandData & { _pinchChanged: boolean; _prevPinching: boolean });
+        _pointChanged: pointing !== prevPointing,
+        _prevPointing: prevPointing,
+      } as HandData & { _pinchChanged: boolean; _prevPinching: boolean; _pointChanged: boolean; _prevPointing: boolean });
     }
 
     return results.length > 0 ? results : null;
@@ -177,9 +250,33 @@ export class HandTracker {
     return transitions;
   }
 
+  /**
+   * Check if a hand's point gesture just changed.
+   * Call after readHands() on the same frame.
+   */
+  getPointTransitions(hands: HandData[]): Array<{ hand: Handedness; state: "start" | "end"; position: Vector3Like; direction: Vector3Like }> {
+    const transitions: Array<{ hand: Handedness; state: "start" | "end"; position: Vector3Like; direction: Vector3Like }> = [];
+
+    for (const h of hands) {
+      const ext = h as HandData & { _pointChanged?: boolean };
+      if (ext._pointChanged) {
+        transitions.push({
+          hand: h.hand,
+          state: h.pointing ? "start" : "end",
+          position: h.pointOrigin,
+          direction: h.pointDirection,
+        });
+      }
+    }
+
+    return transitions;
+  }
+
   reset(): void {
     this.pinchStates.left.pinching = false;
     this.pinchStates.right.pinching = false;
+    this.pointStates.left.pointing = false;
+    this.pointStates.right.pointing = false;
   }
 }
 

@@ -48,7 +48,8 @@ const DEFAULT_OPTIONAL_FEATURES = [
   "anchors",
   "hit-test",
   "dom-overlay",
-  "hand-tracking"
+  "hand-tracking",
+  "camera-access"
 ];
 
 const DEFAULT_REFERENCE_SPACE_ORDER: XrReferenceSpaceType[] = [

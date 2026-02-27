@@ -50,7 +50,7 @@ export class KmlMapRenderer {
   private loaded = false;
 
   constructor(options: KmlMapRendererOptions = {}) {
-    this.mapSizeMeters = options.mapSizeMeters ?? 0.5;
+    this.mapSizeMeters = options.mapSizeMeters ?? 1.2;
     this.hoverOffsetMeters = options.hoverOffsetMeters ?? 0.02;
     this.root.name = "kml-map";
     this.root.add(this.siteGroup, this.linkGroup);
@@ -218,6 +218,8 @@ function shortenName(name: string): string {
     .replace(/-rf-/g, " ")
     .replace(/sector-/g, "s-")
     .replace(/ptp-/g, "\u2192")
+    .replace(/st-/g, "st ")
+    .replace(/:[0-9a-fA-F]{2}$/i, "")
     .slice(0, 18);
 }
 

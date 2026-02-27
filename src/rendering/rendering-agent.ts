@@ -31,8 +31,8 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
   options.scene.add(labelManager.getRoot());
   options.scene.add(debugHud.sprite);
 
-  // Position debug HUD in a default spot (updated per-frame via camera follow)
-  debugHud.sprite.position.set(-0.3, 1.6, -0.8);
+  // Position debug HUD in bottom-left (updated per-frame via camera follow)
+  debugHud.sprite.position.set(-0.35, 1.15, -0.8);
 
   let unsubscribeTopology: (() => void) | null = null;
   let unsubscribeMarkers: (() => void) | null = null;
@@ -71,12 +71,20 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
     leftPinchStrength: 0,
     rightPinchStrength: 0,
     hudMode: "follow",
+    leftPoint: false,
+    rightPoint: false,
+    leftPointStrength: 0,
+    rightPointStrength: 0,
+    cameraWarning: null,
   };
 
   const animate = (timeMs: number): void => {
     if (!xrRunning) {
       renderer.tick(timeMs);
     }
+    labelManager.updateVisibility(options.camera);
+    // Keep HUD position locked to camera every frame (including desktop)
+    debugHud.update(hudData, timeMs, options.camera);
     animationHandle = window.requestAnimationFrame(animate);
   };
 
@@ -91,6 +99,7 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
           const nodePositions = renderer.getNodePositions();
           const linkMidpoints = renderer.getLinkMidpoints();
           labelManager.updateGraph(graph, nodePositions, linkMidpoints);
+          labelManager.updateVisibility(options.camera);
         });
 
         unsubscribeMarkers = context.events.on("tracking/markers", (payload) => {
@@ -137,8 +146,15 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
           hudData.xrState = payload.state;
           if (payload.state === "running") {
             renderer.setBoundaryPolygon(context.xrRuntime.getBoundaryPolygon());
+            // Set camera warning if detector is not ready when entering XR
+            if (hudData.trackingBackend === "camera-worker" && hudData.detectorStatus !== "ready") {
+              hudData.cameraWarning = hudData.detectorStatus === "failed"
+                ? "NO CAMERA FEED"
+                : "CAMERA STARTING...";
+            }
           } else {
             renderer.setBoundaryPolygon(null);
+            hudData.cameraWarning = null;
           }
         });
 
@@ -146,6 +162,7 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
           if (xrRunning) {
             renderer.tick(payload.time);
           }
+          labelManager.updateVisibility(options.camera);
           hudData.hudMode = debugHud.mode;
           debugHud.update(hudData, payload.time, options.camera);
         });
@@ -159,6 +176,15 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
         unsubscribeTrackingStatus = context.events.on("tracking/status", (payload) => {
           hudData.trackingBackend = payload.backend;
           hudData.detectorStatus = payload.detectorStatus;
+
+          // Camera warning: show in XR mode when camera-worker backend can't get frames
+          if (xrRunning && payload.backend === "camera-worker" && payload.detectorStatus === "failed") {
+            hudData.cameraWarning = "NO CAMERA FEED";
+          } else if (payload.backend === "camera-worker" && payload.detectorStatus === "ready") {
+            hudData.cameraWarning = null;
+          } else if (xrRunning && payload.backend === "camera-worker" && payload.detectorStatus !== "ready") {
+            hudData.cameraWarning = "CAMERA STARTING...";
+          }
         });
 
         unsubscribeHands = context.events.on("interaction/hands", (payload) => {
@@ -168,13 +194,21 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
           hudData.rightPinch = false;
           hudData.leftPinchStrength = 0;
           hudData.rightPinchStrength = 0;
+          hudData.leftPoint = false;
+          hudData.rightPoint = false;
+          hudData.leftPointStrength = 0;
+          hudData.rightPointStrength = 0;
           for (const h of payload.hands) {
             if (h.hand === "left") {
               hudData.leftPinch = h.pinching;
               hudData.leftPinchStrength = h.pinchStrength;
+              hudData.leftPoint = h.pointing;
+              hudData.leftPointStrength = h.pointStrength;
             } else {
               hudData.rightPinch = h.pinching;
               hudData.rightPinchStrength = h.pinchStrength;
+              hudData.rightPoint = h.pointing;
+              hudData.rightPointStrength = h.pointStrength;
             }
           }
         });

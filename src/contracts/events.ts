@@ -105,6 +105,18 @@ export interface AppEventMap {
     position: Vector3Like;
     timestampMs: number;
   };
+  "interaction/point": {
+    hand: Handedness;
+    state: "start" | "end";
+    position: Vector3Like;
+    direction: Vector3Like;
+    timestampMs: number;
+  };
+  "interaction/hover": {
+    kind: "node" | "link" | null;
+    id: string | null;
+    timestampMs: number;
+  };
   "app/performance": PerformanceSampleEvent;
   "app/error": AppErrorEnvelope;
 }

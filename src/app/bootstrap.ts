@@ -1,11 +1,10 @@
 import {
   AmbientLight,
-  BoxGeometry,
+  CanvasTexture,
   Color,
   DirectionalLight,
   Mesh,
   MeshBasicMaterial,
-  MeshStandardMaterial,
   PlaneGeometry,
   PerspectiveCamera,
   Quaternion,
@@ -98,10 +97,10 @@ export async function bootstrapApp(): Promise<void> {
   });
 
   const cameraTrackButton = document.createElement("button");
-  cameraTrackButton.textContent = "Start Camera Tracking";
+  cameraTrackButton.textContent = "Stop Camera Tracking";
   applyControlButtonStyle(cameraTrackButton, {
-    border: "1px solid #1e7353",
-    background: "#0f4830"
+    border: "1px solid #7a6a2a",
+    background: "#5a4a1f"
   });
 
   const mockToggle = document.createElement("button");
@@ -186,7 +185,7 @@ export async function bootstrapApp(): Promise<void> {
   const trackingStats = document.createElement("div");
   trackingStats.style.fontSize = "12px";
   trackingStats.style.opacity = "0.85";
-  trackingStats.textContent = "Tracking markers: 0";
+  trackingStats.textContent = "Tracking markers: 0 (scanning...)";
 
   const trackingBackendLabel = document.createElement("div");
   trackingBackendLabel.style.fontSize = "12px";
@@ -258,15 +257,6 @@ export async function bootstrapApp(): Promise<void> {
   canvasHolder.style.border = "1px solid rgba(92, 128, 138, 0.4)";
   canvasHolder.style.position = "relative";
 
-  const overlayCanvas = document.createElement("canvas");
-  overlayCanvas.style.position = "absolute";
-  overlayCanvas.style.top = "0";
-  overlayCanvas.style.left = "0";
-  overlayCanvas.style.width = "100%";
-  overlayCanvas.style.height = "100%";
-  overlayCanvas.style.pointerEvents = "none";
-  const overlayCtx = overlayCanvas.getContext("2d");
-
   toolbar.append(startButton, stopButton, cameraTrackButton, mockToggle, stressToggle);
   wrapper.append(
     toolbar,
@@ -303,24 +293,16 @@ export async function bootstrapApp(): Promise<void> {
   const renderer = new WebGLRenderer({ antialias: true, alpha: true });
   renderer.setPixelRatio(window.devicePixelRatio);
   renderer.setSize(window.innerWidth, window.innerHeight * 0.75);
-  canvasHolder.append(renderer.domElement, overlayCanvas);
-  overlayCanvas.width = renderer.domElement.width;
-  overlayCanvas.height = renderer.domElement.height;
+  canvasHolder.append(renderer.domElement);
 
   const ambient = new AmbientLight(0xffffff, 0.5);
   const keyLight = new DirectionalLight(0xffffff, 1.0);
   keyLight.position.set(2, 4, 3);
 
-  const box = new Mesh(
-    new BoxGeometry(0.35, 0.35, 0.35),
-    new MeshStandardMaterial({ color: "#25a9d6" })
-  );
-  box.position.set(0, 1.35, -1.3);
-
   const cameraPiPMesh = new Mesh(
     new PlaneGeometry(0.46, 0.26),
     new MeshBasicMaterial({
-      color: "#101820",
+      color: 0xffffff,
       transparent: true,
       opacity: 0.96
     })
@@ -329,7 +311,7 @@ export async function bootstrapApp(): Promise<void> {
   cameraPiPMesh.position.set(0.55, 1.55, -1.05);
   cameraPiPMesh.name = "camera-pip";
 
-  scene.add(ambient, keyLight, box, cameraPiPMesh);
+  scene.add(ambient, keyLight, cameraPiPMesh);
 
   const xrRuntime = new XrRuntime(renderer);
   const events = createAppEventBus();
@@ -470,13 +452,15 @@ export async function bootstrapApp(): Promise<void> {
   };
 
   let desktopLoopHandle = 0;
-  let desktopTrackingActive = false;
+  // Keep tracking active by default so desktop and XR scanning start
+  // without requiring a separate "Start Camera Tracking" click.
+  let desktopTrackingActive = true;
   const defaultBackground = scene.background;
   let videoTexture: VideoTexture | null = null;
-  let cameraPiPTexture: VideoTexture | null = null;
+  let cameraPiPTexture: CanvasTexture | null = null;
   const xrCameraPos = new Vector3();
   const xrCameraQuat = new Quaternion();
-  const pipOffset = new Vector3(0.34, -0.08, -0.68);
+  const pipOffset = new Vector3(0.30, 0.17, -0.65);
 
   const clearCameraPiPTexture = (): void => {
     if (!cameraPiPTexture) {
@@ -492,6 +476,24 @@ export async function bootstrapApp(): Promise<void> {
     cameraPiPMesh.visible = false;
   };
 
+  const ensureCameraPiPCanvasTexture = (): void => {
+    const material = cameraPiPMesh.material;
+    if (!(material instanceof MeshBasicMaterial) || cameraPiPTexture) {
+      return;
+    }
+
+    cameraPiPTexture = new CanvasTexture(cameraPiPCanvas);
+    material.map = cameraPiPTexture;
+    material.needsUpdate = true;
+  };
+
+  const isVideoTrackLive = (video: HTMLVideoElement): boolean => {
+    const stream = video.srcObject;
+    if (!(stream instanceof MediaStream)) return false;
+    const tracks = stream.getVideoTracks();
+    return tracks.length > 0 && tracks[0].readyState === "live" && !tracks[0].muted;
+  };
+
   const updateInSceneCameraPiP = (inXrMode: boolean): void => {
     if (switchableDetector.getMode() !== "camera") {
       clearCameraPiPTexture();
@@ -499,24 +501,12 @@ export async function bootstrapApp(): Promise<void> {
     }
 
     const video = switchableDetector.camera.getVideo();
-    if (!video || video.readyState < 2) {
-      cameraPiPMesh.visible = false;
-      return;
+    const videoReady = Boolean(video && video.readyState >= 2 && isVideoTrackLive(video));
+    ensureCameraPiPCanvasTexture();
+    if (cameraPiPTexture) {
+      cameraPiPTexture.needsUpdate = true;
     }
-
-    const material = cameraPiPMesh.material;
-    if (!(material instanceof MeshBasicMaterial)) {
-      return;
-    }
-
-    if (!cameraPiPTexture) {
-      cameraPiPTexture = new VideoTexture(video);
-      material.map = cameraPiPTexture;
-      material.needsUpdate = true;
-    }
-
-    cameraPiPTexture.needsUpdate = true;
-    cameraPiPMesh.visible = true;
+    cameraPiPMesh.visible = desktopTrackingActive && videoReady;
 
     if (inXrMode) {
       const xrCamera = renderer.xr.getCamera();
@@ -560,21 +550,12 @@ export async function bootstrapApp(): Promise<void> {
           videoTexture.needsUpdate = true;
         }
       }
-      updateInSceneCameraPiP(false);
-
-      // Draw marker overlay
-      if (overlayCtx && desktopTrackingActive && switchableDetector.getMode() === "camera") {
-        drawMarkerOverlay(overlayCtx, overlayCanvas, switchableDetector);
-      } else if (overlayCtx) {
-        overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
-      }
-
       if (cameraPiPCtx) {
         drawCameraPiP(cameraPiPCtx, cameraPiPCanvas, switchableDetector, cameraPiPLabel);
       }
+      updateInSceneCameraPiP(false);
 
-      box.rotation.y = time * 0.00035;
-      box.rotation.x = time * 0.0002;
+
       renderer.render(scene, camera);
       desktopLoopHandle = window.requestAnimationFrame(desktopLoop);
     }
@@ -588,14 +569,12 @@ export async function bootstrapApp(): Promise<void> {
     }
     emitPerformance("xr", tick.time);
     events.emit("xr/frame", tick);
-    box.rotation.y += 0.01;
-    box.rotation.x += 0.004;
     const snapshot = xrPerformance.getSnapshot(tick.time);
     frameStats.textContent = `XR ${snapshot.fps.toFixed(1)} FPS | avg ${snapshot.avgFrameTimeMs.toFixed(2)}ms | p95 ${snapshot.p95FrameTimeMs.toFixed(2)}ms`;
-    updateInSceneCameraPiP(true);
     if (cameraPiPCtx) {
       drawCameraPiP(cameraPiPCtx, cameraPiPCanvas, switchableDetector, cameraPiPLabel);
     }
+    updateInSceneCameraPiP(true);
     renderer.render(scene, camera);
     setState();
   });
@@ -694,6 +673,14 @@ export async function bootstrapApp(): Promise<void> {
   startButton.addEventListener("click", async () => {
     try {
       await refreshCameraPermissionState();
+
+      if (!desktopTrackingActive) {
+        desktopTrackingActive = true;
+        cameraTrackButton.textContent = "Stop Camera Tracking";
+        cameraTrackButton.style.border = "1px solid #7a6a2a";
+        cameraTrackButton.style.background = "#5a4a1f";
+        trackingStats.textContent = "Tracking markers: 0 (scanning...)";
+      }
 
       if (switchableDetector.getMode() === "camera") {
         // Keep XR start independent from detector startup.
@@ -809,10 +796,10 @@ export async function bootstrapApp(): Promise<void> {
   stressToggle.addEventListener("click", () => {
     stressActive = !stressActive;
     if (stressActive) {
-      stressToggle.textContent = "Stress: On (100/200)";
+      stressToggle.textContent = "Stress: On (KML)";
       stressToggle.style.border = "1px solid #a83e8f";
       stressToggle.style.background = "#5f1f4f";
-      const stressSnapshot = generateStressTopology({ nodeCount: 100, linkCount: 200 });
+      const stressSnapshot = generateStressTopology({ kmlText });
       events.emit("topology/snapshot", {
         snapshot: stressSnapshot,
         timestampMs: performance.now(),
@@ -831,8 +818,6 @@ export async function bootstrapApp(): Promise<void> {
     camera.aspect = window.innerWidth / Math.max(window.innerHeight, 1);
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight * 0.75);
-    overlayCanvas.width = renderer.domElement.width;
-    overlayCanvas.height = renderer.domElement.height;
   });
 
   window.addEventListener("beforeunload", () => {
@@ -956,85 +941,4 @@ function drawPiPText(
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.fillText(text, canvas.width / 2, canvas.height / 2);
-}
-
-function drawMarkerOverlay(
-  ctx: CanvasRenderingContext2D,
-  canvas: HTMLCanvasElement,
-  detector: import("../tracking").SwitchableDetector
-): void {
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-  const overlay = detector.camera.getOverlayData();
-  if (overlay.detections.length === 0) return;
-
-  // Scale from detector capture coords → overlay canvas coords
-  const sx = canvas.width / overlay.width;
-  const sy = canvas.height / overlay.height;
-
-  for (const det of overlay.detections) {
-    const corners = det.corners;
-    if (!corners || corners.length < 4) continue;
-
-    const isBest = det.markerId === overlay.bestId;
-
-    // Draw quad outline
-    ctx.beginPath();
-    ctx.moveTo(corners[0].x * sx, corners[0].y * sy);
-    for (let i = 1; i < corners.length; i++) {
-      ctx.lineTo(corners[i].x * sx, corners[i].y * sy);
-    }
-    ctx.closePath();
-
-    ctx.lineWidth = isBest ? 3 : 1.5;
-    ctx.strokeStyle = isBest ? "#00ff88" : "#ffaa33";
-    ctx.stroke();
-
-    // Fill with translucent highlight
-    ctx.fillStyle = isBest ? "rgba(0, 255, 136, 0.12)" : "rgba(255, 170, 51, 0.08)";
-    ctx.fill();
-
-    // Draw corner dots
-    for (const corner of corners) {
-      ctx.beginPath();
-      ctx.arc(corner.x * sx, corner.y * sy, isBest ? 4 : 2.5, 0, Math.PI * 2);
-      ctx.fillStyle = isBest ? "#00ff88" : "#ffaa33";
-      ctx.fill();
-    }
-
-    // ID label
-    const cx = corners.reduce((s, c) => s + c.x, 0) / corners.length * sx;
-    const cy = corners.reduce((s, c) => s + c.y, 0) / corners.length * sy;
-
-    const label = `ID ${det.markerId}`;
-    ctx.font = isBest ? "bold 16px monospace" : "12px monospace";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-
-    // Background pill
-    const metrics = ctx.measureText(label);
-    const pw = metrics.width + 12;
-    const ph = isBest ? 22 : 18;
-    ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
-    ctx.beginPath();
-    ctx.roundRect(cx - pw / 2, cy - ph / 2, pw, ph, 4);
-    ctx.fill();
-
-    ctx.fillStyle = isBest ? "#00ff88" : "#ffaa33";
-    ctx.fillText(label, cx, cy);
-
-    // Confidence badge for best
-    if (isBest) {
-      const confLabel = `${(det.confidence * 100).toFixed(0)}%`;
-      ctx.font = "11px monospace";
-      const confY = cy + ph / 2 + 12;
-      ctx.fillStyle = "rgba(0, 0, 0, 0.6)";
-      const cm = ctx.measureText(confLabel);
-      ctx.beginPath();
-      ctx.roundRect(cx - cm.width / 2 - 4, confY - 7, cm.width + 8, 14, 3);
-      ctx.fill();
-      ctx.fillStyle = "#00ff88";
-      ctx.fillText(confLabel, cx, confY);
-    }
-  }
 }

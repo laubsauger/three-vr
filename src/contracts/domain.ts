@@ -88,4 +88,10 @@ export interface HandData {
   pinchStrength: number;
   /** Midpoint between thumb tip and index tip. */
   pinchPoint: Vector3Like;
+  pointing: boolean;
+  pointStrength: number;
+  /** Index fingertip position when pointing. */
+  pointOrigin: Vector3Like;
+  /** Direction from index distal → tip (normalized in world space). */
+  pointDirection: Vector3Like;
 }

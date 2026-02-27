@@ -1,8 +1,6 @@
 import {
   BufferGeometry,
-  Color,
   CylinderGeometry,
-  DoubleSide,
   Group,
   LineBasicMaterial,
   LineLoop,
@@ -16,19 +14,26 @@ import {
 import type { RenderGraphView, RenderLinkView, RenderNodeView } from "../topology";
 import type { TrackedMarker, XrBoundaryPoint } from "../contracts";
 
-const LINK_SEGMENT_COUNT = 12;
+const LINK_SEGMENT_COUNT = 4;
+const NODE_RADIUS = 0.08;
+const NODE_SPHERE_WIDTH_SEGMENTS = 12;
+const NODE_SPHERE_HEIGHT_SEGMENTS = 8;
+const LINK_BEAM_RADIAL_SEGMENTS = 8;
+const PACKET_SPHERE_WIDTH_SEGMENTS = 8;
+const PACKET_SPHERE_HEIGHT_SEGMENTS = 6;
+const MIN_LINK_BEAM_RADIUS = 0.003;
+const MIN_PACKET_RADIUS = 0.015;
+const MARKER_LAYOUT_POSITION_EPSILON_SQ = 0.0004;
+const MARKER_LAYOUT_MIN_INTERVAL_MS = 80;
 
 interface LinkVisualState {
   group: Group;
   segments: Array<Mesh<CylinderGeometry, MeshStandardMaterial>>;
-  packetA: Mesh<SphereGeometry, MeshStandardMaterial>;
-  packetB: Mesh<SphereGeometry, MeshStandardMaterial>;
+  packet: Mesh<SphereGeometry, MeshStandardMaterial>;
   flowHz: number;
   targetFlowHz: number;
   beamRadius: number;
   targetBeamRadius: number;
-  /** Geometry creation radius (constant, used as scale reference). */
-  baseGeomRadius: number;
   path: Vector3[];
   phase: number;
 }
@@ -45,14 +50,36 @@ export class InfraSceneRenderer {
   private readonly nodeGroup = new Group();
   private readonly linkGroup = new Group();
   private readonly markerAnchors = new Map<number, Vector3>();
+  private readonly floatingNodePositions = new Map<string, Vector3>();
   private readonly nodeMeshes = new Map<string, Mesh<SphereGeometry, MeshStandardMaterial>>();
   private readonly linkMeshes = new Map<string, LinkVisualState>();
+  private readonly linkSegmentMaterials = new Map<string, MeshStandardMaterial>();
+  private readonly linkPacketMaterials = new Map<string, MeshStandardMaterial>();
+  private readonly nodeGeometry = new SphereGeometry(
+    1,
+    NODE_SPHERE_WIDTH_SEGMENTS,
+    NODE_SPHERE_HEIGHT_SEGMENTS
+  );
+  private readonly linkSegmentGeometry = new CylinderGeometry(
+    1,
+    1,
+    1,
+    LINK_BEAM_RADIAL_SEGMENTS,
+    1,
+    true
+  );
+  private readonly packetGeometry = new SphereGeometry(
+    1,
+    PACKET_SPHERE_WIDTH_SEGMENTS,
+    PACKET_SPHERE_HEIGHT_SEGMENTS
+  );
   private graph: RenderGraphView = { nodes: [], links: [] };
   private boundaryPolygon: XrBoundaryPoint[] | null = null;
   private boundaryLoop: LineLoop<BufferGeometry, LineBasicMaterial> | null = null;
   private readonly tmpMid = new Vector3();
   private readonly tmpDir = new Vector3();
   private lastTickSec = 0;
+  private lastMarkerLayoutAtMs = 0;
 
   constructor(scene: Scene) {
     this.root.name = "infra-root";
@@ -71,12 +98,47 @@ export class InfraSceneRenderer {
   }
 
   updateTrackedMarkers(markers: TrackedMarker[]): void {
+    const seen = new Set<number>();
+    let shouldRecompute = false;
+
     for (const marker of markers) {
-      this.markerAnchors.set(
-        marker.markerId,
-        new Vector3(marker.pose.position.x, marker.pose.position.y, marker.pose.position.z)
-      );
+      seen.add(marker.markerId);
+      const existing = this.markerAnchors.get(marker.markerId);
+      if (existing) {
+        const dx = existing.x - marker.pose.position.x;
+        const dy = existing.y - marker.pose.position.y;
+        const dz = existing.z - marker.pose.position.z;
+        if (dx * dx + dy * dy + dz * dz > MARKER_LAYOUT_POSITION_EPSILON_SQ) {
+          shouldRecompute = true;
+        }
+        existing.set(marker.pose.position.x, marker.pose.position.y, marker.pose.position.z);
+      } else {
+        this.markerAnchors.set(
+          marker.markerId,
+          new Vector3(marker.pose.position.x, marker.pose.position.y, marker.pose.position.z)
+        );
+        shouldRecompute = true;
+      }
     }
+
+    const markerIds = [...this.markerAnchors.keys()];
+    for (const markerId of markerIds) {
+      if (seen.has(markerId)) {
+        continue;
+      }
+      this.markerAnchors.delete(markerId);
+      shouldRecompute = true;
+    }
+
+    if (!shouldRecompute) {
+      return;
+    }
+
+    const now = performance.now();
+    if (now - this.lastMarkerLayoutAtMs < MARKER_LAYOUT_MIN_INTERVAL_MS) {
+      return;
+    }
+    this.lastMarkerLayoutAtMs = now;
     this.recomputeLayout();
   }
 
@@ -100,36 +162,25 @@ export class InfraSceneRenderer {
         visual.beamRadius += (visual.targetBeamRadius - visual.beamRadius) * lerpAlpha;
       }
 
-      const radiusScale = visual.baseGeomRadius > 0
-        ? visual.beamRadius / visual.baseGeomRadius
-        : 1;
-
-      const basePulse =
-        0.42 + 0.58 * (0.5 + 0.5 * Math.sin((timeSec * visual.flowHz + visual.phase) * Math.PI * 2));
+      const beamRadius = Math.max(visual.beamRadius, MIN_LINK_BEAM_RADIUS);
+      const packetRadius = Math.max(MIN_PACKET_RADIUS, beamRadius * 0.78);
+      const phaseTime = timeSec * visual.flowHz + visual.phase;
+      const packetLead = fract(phaseTime);
+      const packetTrail = Math.max(0, packetLead - 0.18);
 
       for (let i = 0; i < visual.segments.length; i++) {
         const segment = visual.segments[i];
-        const offset = i / Math.max(visual.segments.length - 1, 1);
-        const stagger = 0.82 + 0.18 * Math.sin((timeSec * visual.flowHz + visual.phase + offset) * Math.PI * 2);
-        segment.material.opacity = 0.28 + basePulse * 0.28 * stagger;
-        segment.material.emissiveIntensity = 0.16 + basePulse * 0.42 * stagger;
-        // Smooth thickness via scale (y stays as segment length from layout)
-        segment.scale.x = radiusScale;
-        segment.scale.z = radiusScale;
+        const segmentOffset = i / Math.max(visual.segments.length - 1, 1);
+        const headPulse = Math.max(0, 1 - Math.abs(segmentOffset - packetLead) * 4.8);
+        const trailPulse = Math.max(0, 1 - Math.abs(segmentOffset - packetTrail) * 5.8);
+        const animatedRadius = beamRadius * (0.48 + headPulse * 1.55 + trailPulse * 0.4);
+        segment.scale.x = animatedRadius;
+        segment.scale.z = animatedRadius;
       }
 
-      const packetLead = fract(timeSec * visual.flowHz + visual.phase);
-      const packetTrail = fract(packetLead + 0.5);
-      setPositionOnPath(visual.packetA.position, visual.path, packetLead);
-      setPositionOnPath(visual.packetB.position, visual.path, packetTrail);
-
-      const packetFlash =
-        0.5 + 0.5 * Math.sin((timeSec * visual.flowHz + visual.phase + 0.15) * Math.PI * 4);
-      visual.packetA.material.emissiveIntensity = 0.84 + packetFlash * 0.95;
-      visual.packetB.material.emissiveIntensity = 0.84 + packetFlash * 0.95;
-      // Scale packets proportionally to beam thickness
-      visual.packetA.scale.setScalar(radiusScale);
-      visual.packetB.scale.setScalar(radiusScale);
+      const packetPulse = 1.15 + 0.95 * (0.5 + 0.5 * Math.sin((phaseTime + 0.12) * Math.PI * 4));
+      setPositionOnPath(visual.packet.position, visual.path, packetLead);
+      visual.packet.scale.setScalar(packetRadius * packetPulse);
     }
   }
 
@@ -154,21 +205,12 @@ export class InfraSceneRenderer {
 
   dispose(): void {
     for (const mesh of this.nodeMeshes.values()) {
-      mesh.geometry.dispose();
       mesh.material.dispose();
       this.nodeGroup.remove(mesh);
     }
     this.nodeMeshes.clear();
 
     for (const visual of this.linkMeshes.values()) {
-      for (const segment of visual.segments) {
-        segment.geometry.dispose();
-        segment.material.dispose();
-      }
-      visual.packetA.geometry.dispose();
-      visual.packetA.material.dispose();
-      visual.packetB.geometry.dispose();
-      visual.packetB.material.dispose();
       this.linkGroup.remove(visual.group);
     }
     this.linkMeshes.clear();
@@ -180,6 +222,17 @@ export class InfraSceneRenderer {
       this.boundaryLoop = null;
     }
 
+    this.nodeGeometry.dispose();
+    this.linkSegmentGeometry.dispose();
+    this.packetGeometry.dispose();
+    for (const material of this.linkSegmentMaterials.values()) {
+      material.dispose();
+    }
+    this.linkSegmentMaterials.clear();
+    for (const material of this.linkPacketMaterials.values()) {
+      material.dispose();
+    }
+    this.linkPacketMaterials.clear();
     this.root.removeFromParent();
   }
 
@@ -190,19 +243,20 @@ export class InfraSceneRenderer {
       if (nextIds.has(nodeId)) {
         continue;
       }
-      mesh.geometry.dispose();
       mesh.material.dispose();
       mesh.removeFromParent();
       this.nodeMeshes.delete(nodeId);
+      this.floatingNodePositions.delete(nodeId);
     }
 
     for (const node of nodes) {
       let mesh = this.nodeMeshes.get(node.id);
       if (!mesh) {
         mesh = new Mesh(
-          new SphereGeometry(0.08, 20, 16),
+          this.nodeGeometry,
           new MeshStandardMaterial({ color: selectNodeColor(node.health), roughness: 0.3, metalness: 0.1 })
         );
+        mesh.scale.setScalar(NODE_RADIUS);
         mesh.name = `node-${node.id}`;
         const metadata: SelectableMeta = {
           selectableType: "node",
@@ -215,7 +269,7 @@ export class InfraSceneRenderer {
         this.nodeGroup.add(mesh);
         this.nodeMeshes.set(node.id, mesh);
       } else {
-        mesh.material.color = new Color(selectNodeColor(node.health));
+        mesh.material.color.set(selectNodeColor(node.health));
       }
     }
   }
@@ -227,14 +281,6 @@ export class InfraSceneRenderer {
       if (nextIds.has(linkId)) {
         continue;
       }
-      for (const segment of visual.segments) {
-        segment.geometry.dispose();
-        segment.material.dispose();
-      }
-      visual.packetA.geometry.dispose();
-      visual.packetA.material.dispose();
-      visual.packetB.geometry.dispose();
-      visual.packetB.material.dispose();
       visual.group.removeFromParent();
       this.linkMeshes.delete(linkId);
     }
@@ -253,72 +299,43 @@ export class InfraSceneRenderer {
           ...metadata
         };
 
+        const segmentMaterial = this.getSharedLinkSegmentMaterial(link.beamColorHex);
         const segments: Array<Mesh<CylinderGeometry, MeshStandardMaterial>> = [];
         for (let i = 0; i < LINK_SEGMENT_COUNT; i++) {
           const segment = new Mesh(
-            new CylinderGeometry(link.beamRadius, link.beamRadius, 1, 14, 1, true),
-            new MeshStandardMaterial({
-              color: link.beamColorHex,
-              emissive: link.beamColorHex,
-              emissiveIntensity: 0.36,
-              transparent: true,
-              opacity: 0.5,
-              metalness: 0.2,
-              roughness: 0.24,
-              side: DoubleSide
-            })
+            this.linkSegmentGeometry,
+            segmentMaterial
           );
           segment.name = `link-segment-${link.id}-${i}`;
           segments.push(segment);
           group.add(segment);
         }
 
-        const packetRadius = Math.max(0.015, link.beamRadius * 0.78);
-        const packetA = new Mesh(
-          new SphereGeometry(packetRadius, 14, 10),
-          new MeshStandardMaterial({
-            color: link.beamColorHex,
-            emissive: link.beamColorHex,
-            emissiveIntensity: 1.1,
-            metalness: 0.08,
-            roughness: 0.2
-          })
-        );
-        const packetB = new Mesh(
-          new SphereGeometry(packetRadius, 14, 10),
-          new MeshStandardMaterial({
-            color: link.beamColorHex,
-            emissive: link.beamColorHex,
-            emissiveIntensity: 1.1,
-            metalness: 0.08,
-            roughness: 0.2
-          })
+        const initialBeamRadius = Math.max(link.trafficRadius, MIN_LINK_BEAM_RADIUS);
+        const initialPacketRadius = Math.max(MIN_PACKET_RADIUS, initialBeamRadius * 0.78);
+        const packet = new Mesh(
+          this.packetGeometry,
+          this.getSharedLinkPacketMaterial(link.beamColorHex)
         );
 
-        group.add(packetA, packetB);
+        group.add(packet);
         this.linkGroup.add(group);
 
-        const initialScale = link.beamRadius > 0
-          ? link.trafficRadius / link.beamRadius
-          : 1;
         for (const segment of segments) {
-          segment.scale.x = initialScale;
-          segment.scale.z = initialScale;
+          segment.scale.x = initialBeamRadius;
+          segment.scale.z = initialBeamRadius;
         }
-        packetA.scale.setScalar(initialScale);
-        packetB.scale.setScalar(initialScale);
+        packet.scale.setScalar(initialPacketRadius);
 
         visual = {
           group,
           segments,
-          packetA,
-          packetB,
+          packet,
           flowHz: link.flowHz,
           targetFlowHz: link.flowHz,
           beamRadius: link.trafficRadius,
           targetBeamRadius: link.trafficRadius,
-          baseGeomRadius: link.beamRadius,
-          path: [],
+          path: createPathBuffer(LINK_SEGMENT_COUNT + 1),
           phase: Math.random()
         };
         this.linkMeshes.set(link.id, visual);
@@ -327,14 +344,16 @@ export class InfraSceneRenderer {
         visual.targetBeamRadius = link.trafficRadius;
       }
 
+      const nextSegmentMaterial = this.getSharedLinkSegmentMaterial(link.beamColorHex);
       for (const segment of visual.segments) {
-        segment.material.color = new Color(link.beamColorHex);
-        segment.material.emissive = new Color(link.beamColorHex);
+        if (segment.material !== nextSegmentMaterial) {
+          segment.material = nextSegmentMaterial;
+        }
       }
-      visual.packetA.material.color = new Color(link.beamColorHex);
-      visual.packetA.material.emissive = new Color(link.beamColorHex);
-      visual.packetB.material.color = new Color(link.beamColorHex);
-      visual.packetB.material.emissive = new Color(link.beamColorHex);
+      const nextPacketMaterial = this.getSharedLinkPacketMaterial(link.beamColorHex);
+      if (visual.packet.material !== nextPacketMaterial) {
+        visual.packet.material = nextPacketMaterial;
+      }
     }
   }
 
@@ -358,8 +377,8 @@ export class InfraSceneRenderer {
         continue;
       }
 
-      const path = this.buildConstrainedPath(from, to, LINK_SEGMENT_COUNT + 1);
-      visual.path = path;
+      this.fillConstrainedPath(visual.path, from, to);
+      const path = visual.path;
 
       for (let i = 0; i < visual.segments.length; i++) {
         const a = path[i];
@@ -374,21 +393,20 @@ export class InfraSceneRenderer {
     }
   }
 
-  private buildConstrainedPath(from: Vector3, to: Vector3, samples: number): Vector3[] {
-    const path: Vector3[] = [];
-    const count = Math.max(samples, 2);
+  private fillConstrainedPath(path: Vector3[], from: Vector3, to: Vector3): void {
+    const count = Math.max(path.length, 2);
 
     for (let i = 0; i < count; i++) {
       const t = i / (count - 1);
-      const point = new Vector3(
+      const point = path[i] ?? new Vector3();
+      point.set(
         from.x + (to.x - from.x) * t,
         from.y + (to.y - from.y) * t,
         from.z + (to.z - from.z) * t
       );
-      path.push(this.clampToBoundary(point));
+      this.clampToBoundaryInPlace(point);
+      path[i] = point;
     }
-
-    return path;
   }
 
   private updateBeamTransform(
@@ -433,17 +451,28 @@ export class InfraSceneRenderer {
     }
 
     const center = this.getPreferredCenter();
-    const radius = this.getPreferredRadius(center.x, center.z);
+    const baseRadius = this.getPreferredRadius(center.x, center.z);
     const centerY = 1.35;
     const count = Math.max(floating.length, 1);
 
+    // Scale radius so adjacent nodes have at least ~0.22m arc spacing
+    const minArcSpacing = 0.22;
+    const neededRadius = (count * minArcSpacing) / (Math.PI * 2);
+    const radius = Math.max(baseRadius, neededRadius);
+
     floating.forEach((node, index) => {
-      const angle = (index / count) * Math.PI * 2;
-      const candidate = new Vector3(
-        center.x + Math.cos(angle) * radius,
-        centerY + 0.15 * Math.sin(index),
-        center.z + Math.sin(angle) * radius * 0.7
+      // Distribute across 2 concentric rings for better spread
+      const ring = index % 2;
+      const ringRadius = radius * (1 + ring * 0.35);
+      const ringOffset = ring * (Math.PI / count); // stagger inner/outer
+      const angle = (index / count) * Math.PI * 2 + ringOffset;
+      const candidate = this.floatingNodePositions.get(node.id) ?? new Vector3();
+      candidate.set(
+        center.x + Math.cos(angle) * ringRadius,
+        centerY + 0.20 * Math.sin(index * 0.8),
+        center.z + Math.sin(angle) * ringRadius * 0.7
       );
+      this.floatingNodePositions.set(node.id, candidate);
       output.set(node.id, this.clampToBoundary(candidate));
     });
 
@@ -481,16 +510,23 @@ export class InfraSceneRenderer {
   }
 
   private clampToBoundary(position: Vector3): Vector3 {
+    const clamped = position.clone();
+    this.clampToBoundaryInPlace(clamped);
+    return clamped;
+  }
+
+  private clampToBoundaryInPlace(position: Vector3): void {
     if (!this.boundaryPolygon || this.boundaryPolygon.length < 3) {
-      return position.clone();
+      return;
     }
 
     if (isInsidePolygon(position.x, position.z, this.boundaryPolygon)) {
-      return position.clone();
+      return;
     }
 
     const closest = closestPointOnPolygon(position.x, position.z, this.boundaryPolygon);
-    return new Vector3(closest.x, position.y, closest.z);
+    position.x = closest.x;
+    position.z = closest.z;
   }
 
   private updateBoundaryVisual(): void {
@@ -515,6 +551,36 @@ export class InfraSceneRenderer {
     this.boundaryLoop = new LineLoop(geometry, material);
     this.boundaryLoop.name = "room-boundary";
     this.root.add(this.boundaryLoop);
+  }
+
+  private getSharedLinkSegmentMaterial(colorHex: string): MeshStandardMaterial {
+    let material = this.linkSegmentMaterials.get(colorHex);
+    if (!material) {
+      material = new MeshStandardMaterial({
+        color: colorHex,
+        emissive: colorHex,
+        emissiveIntensity: 0.26,
+        metalness: 0.12,
+        roughness: 0.42
+      });
+      this.linkSegmentMaterials.set(colorHex, material);
+    }
+    return material;
+  }
+
+  private getSharedLinkPacketMaterial(colorHex: string): MeshStandardMaterial {
+    let material = this.linkPacketMaterials.get(colorHex);
+    if (!material) {
+      material = new MeshStandardMaterial({
+        color: colorHex,
+        emissive: colorHex,
+        emissiveIntensity: 0.95,
+        metalness: 0.04,
+        roughness: 0.28
+      });
+      this.linkPacketMaterials.set(colorHex, material);
+    }
+    return material;
   }
 }
 
@@ -544,6 +610,10 @@ function setPositionOnPath(target: Vector3, path: Vector3[], t: number): void {
     a.y + (b.y - a.y) * localT,
     a.z + (b.z - a.z) * localT
   );
+}
+
+function createPathBuffer(pointCount: number): Vector3[] {
+  return Array.from({ length: Math.max(pointCount, 2) }, () => new Vector3());
 }
 
 function isInsidePolygon(x: number, z: number, polygon: XrBoundaryPoint[]): boolean {

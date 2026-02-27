@@ -17,6 +17,7 @@ import type { IntegrationContext, InteractionAgent } from "../contracts/integrat
 import { HandTracker } from "./hand-tracking";
 
 type SelectableKind = "node" | "link";
+type VisualState = "none" | "hover" | "selected";
 
 interface SelectableTarget {
   kind: SelectableKind;
@@ -35,17 +36,8 @@ interface InputSourceLike {
 
 interface PoseLike {
   transform: {
-    position: {
-      x: number;
-      y: number;
-      z: number;
-    };
-    orientation: {
-      x: number;
-      y: number;
-      z: number;
-      w: number;
-    };
+    position: { x: number; y: number; z: number };
+    orientation: { x: number; y: number; z: number; w: number };
   };
 }
 
@@ -57,6 +49,11 @@ interface InputSourceEventLike {
   frame: unknown;
   inputSource: unknown;
 }
+
+/** Proximity radius for hover detection around the index fingertip. */
+const HOVER_PROXIMITY_RADIUS = 0.25;
+/** Max distance for finger-pointing ray hover. */
+const HOVER_RAY_MAX_DISTANCE = 3.0;
 
 export interface InteractionAgentOptions {
   scene: Scene;
@@ -71,73 +68,102 @@ export function createInteractionAgent(options: InteractionAgentOptions): Intera
     threshold: 0.12
   };
 
+  // Reusable math objects
   const pointer = new Vector2();
   const rayOrigin = new Vector3();
   const rayDirection = new Vector3();
   const orientation = new Quaternion();
+  const tmpWorldPos = new Vector3();
+  const fingerTipPos = new Vector3();
+  const fingerRayDir = new Vector3();
+
+  // Selection state
   let selectedObject: Object3D | null = null;
   let selectedNodeId: string | null = null;
   let selectedLinkId: string | null = null;
+
+  // Hover state
+  let hoveredObject: Object3D | null = null;
+  let hoveredTarget: SelectableTarget | null = null;
+
+  // Listener handles
   let onPointerDown: ((event: PointerEvent) => void) | null = null;
+  let onPointerMove: ((event: PointerEvent) => void) | null = null;
   let onXrSelectStart: EventListener | null = null;
   let onXrSqueezeStart: EventListener | null = null;
   let unsubscribeXrState: (() => void) | null = null;
   let unsubscribeXrFrame: (() => void) | null = null;
   let unsubscribePinch: (() => void) | null = null;
+  let unsubscribePoint: (() => void) | null = null;
   let activeSession: SessionLike | null = null;
+
   const defaultColors = new WeakMap<Material, number>();
   const handTracker = new HandTracker();
-  const tmpWorldPos = new Vector3();
-  const PINCH_PICK_RADIUS = 0.15;
 
-  const setHighlighted = (object: Object3D, highlighted: boolean): void => {
+  // ---- Visual state management ----
+
+  const resolveState = (object: Object3D): VisualState => {
+    if (object === selectedObject) return "selected";
+    if (object === hoveredObject) return "hover";
+    return "none";
+  };
+
+  const applyVisualState = (object: Object3D, state: VisualState): void => {
+    const apply = (mat: Material) => applyMaterialState(mat, state, defaultColors);
+
     if (object instanceof Mesh) {
       const material = object.material;
       if (Array.isArray(material)) {
-        for (const item of material) {
-          applyHighlightToMaterial(item, highlighted, defaultColors);
-        }
+        for (const item of material) apply(item);
       } else {
-        applyHighlightToMaterial(material, highlighted, defaultColors);
+        apply(material);
       }
       return;
     }
 
     const maybeMaterial = (object as Object3D & { material?: Material | Material[] }).material;
-    if (!maybeMaterial) {
-      return;
-    }
-
+    if (!maybeMaterial) return;
     if (Array.isArray(maybeMaterial)) {
-      for (const item of maybeMaterial) {
-        applyHighlightToMaterial(item, highlighted, defaultColors);
-      }
+      for (const item of maybeMaterial) apply(item);
     } else {
-      applyHighlightToMaterial(maybeMaterial, highlighted, defaultColors);
+      apply(maybeMaterial);
     }
   };
 
+  const refreshVisual = (object: Object3D): void => {
+    applyVisualState(object, resolveState(object));
+  };
+
+  // ---- Hover ----
+
+  const updateHover = (context: IntegrationContext, next: SelectableTarget | null): void => {
+    if (next?.object === hoveredObject) return;
+
+    const prevObj = hoveredObject;
+    hoveredObject = next?.object ?? null;
+    hoveredTarget = next;
+
+    if (prevObj) refreshVisual(prevObj);
+    if (hoveredObject) refreshVisual(hoveredObject);
+
+    context.events.emit("interaction/hover", {
+      kind: next?.kind ?? null,
+      id: next?.id ?? null,
+      timestampMs: performance.now(),
+    });
+  };
+
+  // ---- Selection ----
+
   const updateSelection = (context: IntegrationContext, next: SelectableTarget | null): void => {
-    if (selectedObject) {
-      setHighlighted(selectedObject, false);
-      selectedObject = null;
-    }
+    const prevObj = selectedObject;
+    selectedObject = next?.object ?? null;
+    selectedNodeId = next?.kind === "node" ? next.id : null;
+    selectedLinkId = next?.kind === "link" ? next.id : null;
 
-    if (!next) {
-      selectedNodeId = null;
-      selectedLinkId = null;
-      context.events.emit("interaction/selection-change", {
-        selectedNodeId,
-        selectedLinkId,
-        timestampMs: performance.now()
-      });
-      return;
-    }
+    if (prevObj) refreshVisual(prevObj);
+    if (selectedObject) refreshVisual(selectedObject);
 
-    selectedObject = next.object;
-    setHighlighted(next.object, true);
-    selectedNodeId = next.kind === "node" ? next.id : null;
-    selectedLinkId = next.kind === "link" ? next.id : null;
     context.events.emit("interaction/selection-change", {
       selectedNodeId,
       selectedLinkId,
@@ -145,15 +171,20 @@ export function createInteractionAgent(options: InteractionAgentOptions): Intera
     });
   };
 
-  const pickFromRay = (origin: Vector3, direction: Vector3): SelectableTarget | null => {
+  // ---- Picking helpers ----
+
+  const pickFromRay = (origin: Vector3, direction: Vector3, maxDistance?: number): SelectableTarget | null => {
     raycaster.set(origin, direction.normalize());
+    const prevFar = raycaster.far;
+    if (maxDistance != null) raycaster.far = maxDistance;
     const intersections = raycaster.intersectObjects(options.scene.children, true);
+    raycaster.far = prevFar;
     return pickFirstSelectable(intersections.map((entry) => entry.object));
   };
 
-  const pickFromProximity = (point: Vector3): SelectableTarget | null => {
+  const pickFromProximity = (point: Vector3, radius: number): SelectableTarget | null => {
     let bestTarget: SelectableTarget | null = null;
-    let bestDistSq = PINCH_PICK_RADIUS * PINCH_PICK_RADIUS;
+    let bestDistSq = radius * radius;
 
     options.scene.traverse((object) => {
       const selectableType = readSelectableType(object);
@@ -171,6 +202,32 @@ export function createInteractionAgent(options: InteractionAgentOptions): Intera
     return bestTarget;
   };
 
+  /** Hover check using right hand: proximity from index tip, then finger pointing ray. */
+  const pickHoverFromHand = (joints: Array<{ name: string; position: { x: number; y: number; z: number } }>): SelectableTarget | null => {
+    const indexTip = joints.find((j) => j.name === "index-finger-tip");
+    if (!indexTip) return null;
+
+    fingerTipPos.set(indexTip.position.x, indexTip.position.y, indexTip.position.z);
+
+    // Near: proximity from fingertip
+    const nearTarget = pickFromProximity(fingerTipPos, HOVER_PROXIMITY_RADIUS);
+    if (nearTarget) return nearTarget;
+
+    // Far: ray along finger direction (distal → tip)
+    const indexDistal = joints.find((j) => j.name === "index-finger-phalanx-distal");
+    if (!indexDistal) return null;
+
+    fingerRayDir.set(
+      indexTip.position.x - indexDistal.position.x,
+      indexTip.position.y - indexDistal.position.y,
+      indexTip.position.z - indexDistal.position.z,
+    ).normalize();
+
+    return pickFromRay(fingerTipPos, fingerRayDir, HOVER_RAY_MAX_DISTANCE);
+  };
+
+  // ---- XR controller pick ----
+
   const pickFromInputSourceEvent = (
     context: IntegrationContext,
     event: InputSourceEventLike
@@ -178,14 +235,10 @@ export function createInteractionAgent(options: InteractionAgentOptions): Intera
     const frame = asFrame(event.frame);
     const inputSource = asInputSource(event.inputSource);
     const referenceSpace = context.xrRuntime.getReferenceSpace();
-    if (!frame || !inputSource || !referenceSpace || !inputSource.targetRaySpace) {
-      return;
-    }
+    if (!frame || !inputSource || !referenceSpace || !inputSource.targetRaySpace) return;
 
     const pose = frame.getPose(inputSource.targetRaySpace, referenceSpace);
-    if (!pose) {
-      return;
-    }
+    if (!pose) return;
 
     rayOrigin.set(
       pose.transform.position.x,
@@ -202,16 +255,12 @@ export function createInteractionAgent(options: InteractionAgentOptions): Intera
     updateSelection(context, pickFromRay(rayOrigin, rayDirection));
   };
 
+  // ---- XR session listeners (for controllers) ----
+
   const detachSessionListeners = (): void => {
-    if (!activeSession) {
-      return;
-    }
-    if (onXrSelectStart) {
-      activeSession.removeEventListener("selectstart", onXrSelectStart);
-    }
-    if (onXrSqueezeStart) {
-      activeSession.removeEventListener("squeezestart", onXrSqueezeStart);
-    }
+    if (!activeSession) return;
+    if (onXrSelectStart) activeSession.removeEventListener("selectstart", onXrSelectStart);
+    if (onXrSqueezeStart) activeSession.removeEventListener("squeezestart", onXrSqueezeStart);
     activeSession = null;
   };
 
@@ -220,25 +269,17 @@ export function createInteractionAgent(options: InteractionAgentOptions): Intera
     maybeSession: unknown
   ): void => {
     const session = asSession(maybeSession);
-    if (!session || session === activeSession) {
-      return;
-    }
+    if (!session || session === activeSession) return;
 
     detachSessionListeners();
 
     onXrSelectStart = (event: Event) => {
       const inputEvent = asInputSourceEvent(event);
-      if (!inputEvent) {
-        return;
-      }
-      pickFromInputSourceEvent(context, inputEvent);
+      if (inputEvent) pickFromInputSourceEvent(context, inputEvent);
     };
     onXrSqueezeStart = (event: Event) => {
       const inputEvent = asInputSourceEvent(event);
-      if (!inputEvent) {
-        return;
-      }
-      pickFromInputSourceEvent(context, inputEvent);
+      if (inputEvent) pickFromInputSourceEvent(context, inputEvent);
     };
 
     session.addEventListener("selectstart", onXrSelectStart);
@@ -246,23 +287,38 @@ export function createInteractionAgent(options: InteractionAgentOptions): Intera
     activeSession = session;
   };
 
+  // ---- Agent lifecycle ----
+
   return {
     async init(context: IntegrationContext): Promise<void> {
+      // Desktop: click to select
       onPointerDown = (event: PointerEvent) => {
         const canvas = options.renderer.domElement;
         const bounds = canvas.getBoundingClientRect();
-        if (bounds.width === 0 || bounds.height === 0) {
-          return;
-        }
+        if (bounds.width === 0 || bounds.height === 0) return;
 
         pointer.x = ((event.clientX - bounds.left) / bounds.width) * 2 - 1;
         pointer.y = -((event.clientY - bounds.top) / bounds.height) * 2 + 1;
         raycaster.setFromCamera(pointer, options.camera);
-        const ray = raycaster.ray;
-        updateSelection(context, pickFromRay(ray.origin, ray.direction));
+        updateSelection(context, pickFromRay(raycaster.ray.origin, raycaster.ray.direction));
+      };
+
+      // Desktop: move to hover
+      onPointerMove = (event: PointerEvent) => {
+        const canvas = options.renderer.domElement;
+        const bounds = canvas.getBoundingClientRect();
+        if (bounds.width === 0 || bounds.height === 0) return;
+
+        pointer.x = ((event.clientX - bounds.left) / bounds.width) * 2 - 1;
+        pointer.y = -((event.clientY - bounds.top) / bounds.height) * 2 + 1;
+        raycaster.setFromCamera(pointer, options.camera);
+        const target = pickFromRay(raycaster.ray.origin, raycaster.ray.direction);
+        updateHover(context, target);
+        canvas.style.cursor = target ? "pointer" : "default";
       };
 
       options.renderer.domElement.addEventListener("pointerdown", onPointerDown);
+      options.renderer.domElement.addEventListener("pointermove", onPointerMove);
 
       unsubscribeXrState = context.events.on("xr/state", (payload) => {
         if (payload.state === "running") {
@@ -272,12 +328,16 @@ export function createInteractionAgent(options: InteractionAgentOptions): Intera
         }
       });
 
-      // Per-frame hand tracking
+      // Per-frame hand tracking + hover
       unsubscribeXrFrame = context.events.on("xr/frame", (tick) => {
         if (!tick.frame || !tick.referenceSpace) return;
 
         const hands = handTracker.readHands(tick.frame, tick.referenceSpace);
-        if (!hands) return;
+        if (!hands) {
+          // No hands detected → clear hover
+          if (hoveredObject) updateHover(context, null);
+          return;
+        }
 
         context.events.emit("interaction/hands", {
           hands,
@@ -292,13 +352,39 @@ export function createInteractionAgent(options: InteractionAgentOptions): Intera
             timestampMs: tick.time,
           });
         }
+
+        for (const transition of handTracker.getPointTransitions(hands)) {
+          context.events.emit("interaction/point", {
+            hand: transition.hand,
+            state: transition.state,
+            position: transition.position,
+            direction: transition.direction,
+            timestampMs: tick.time,
+          });
+        }
+
+        // Per-frame hover from right hand index finger
+        const rightHand = hands.find((h) => h.hand === "right");
+        if (rightHand) {
+          const target = pickHoverFromHand(rightHand.joints);
+          updateHover(context, target);
+        } else {
+          if (hoveredObject) updateHover(context, null);
+        }
       });
 
-      // Right-hand pinch selects nearest object
+      // Right-hand pinch → select current hover target (or deselect)
       unsubscribePinch = context.events.on("interaction/pinch", (payload) => {
         if (payload.hand !== "right" || payload.state !== "start") return;
-        const pinchPos = new Vector3(payload.position.x, payload.position.y, payload.position.z);
-        const target = pickFromProximity(pinchPos);
+        updateSelection(context, hoveredTarget);
+      });
+
+      // Right-hand point → select via pointing ray
+      unsubscribePoint = context.events.on("interaction/point", (payload) => {
+        if (payload.hand !== "right" || payload.state !== "start") return;
+        fingerTipPos.set(payload.position.x, payload.position.y, payload.position.z);
+        fingerRayDir.set(payload.direction.x, payload.direction.y, payload.direction.z);
+        const target = pickFromRay(fingerTipPos, fingerRayDir, HOVER_RAY_MAX_DISTANCE);
         updateSelection(context, target);
       });
 
@@ -320,6 +406,10 @@ export function createInteractionAgent(options: InteractionAgentOptions): Intera
         unsubscribePinch();
         unsubscribePinch = null;
       }
+      if (unsubscribePoint) {
+        unsubscribePoint();
+        unsubscribePoint = null;
+      }
       handTracker.reset();
       detachSessionListeners();
 
@@ -327,56 +417,55 @@ export function createInteractionAgent(options: InteractionAgentOptions): Intera
         options.renderer.domElement.removeEventListener("pointerdown", onPointerDown);
         onPointerDown = null;
       }
+      if (onPointerMove) {
+        options.renderer.domElement.removeEventListener("pointermove", onPointerMove);
+        onPointerMove = null;
+      }
       if (selectedObject) {
-        setHighlighted(selectedObject, false);
+        refreshVisual(selectedObject);
         selectedObject = null;
+      }
+      if (hoveredObject) {
+        refreshVisual(hoveredObject);
+        hoveredObject = null;
+        hoveredTarget = null;
       }
     }
   };
 }
 
+// ---- Type narrowing helpers ----
+
 function asSession(value: unknown): SessionLike | null {
-  if (!value || typeof value !== "object") {
-    return null;
-  }
+  if (!value || typeof value !== "object") return null;
   const candidate = value as Partial<SessionLike>;
   if (
     typeof candidate.addEventListener !== "function" ||
     typeof candidate.removeEventListener !== "function"
-  ) {
-    return null;
-  }
+  ) return null;
   return candidate as SessionLike;
 }
 
 function asFrame(value: unknown): FrameLike | null {
-  if (!value || typeof value !== "object") {
-    return null;
-  }
+  if (!value || typeof value !== "object") return null;
   const candidate = value as Partial<FrameLike>;
-  if (typeof candidate.getPose !== "function") {
-    return null;
-  }
+  if (typeof candidate.getPose !== "function") return null;
   return candidate as FrameLike;
 }
 
 function asInputSource(value: unknown): InputSourceLike | null {
-  if (!value || typeof value !== "object") {
-    return null;
-  }
+  if (!value || typeof value !== "object") return null;
   return value as InputSourceLike;
 }
 
 function asInputSourceEvent(value: unknown): InputSourceEventLike | null {
-  if (!value || typeof value !== "object") {
-    return null;
-  }
+  if (!value || typeof value !== "object") return null;
   const candidate = value as Partial<InputSourceEventLike>;
-  if (!("frame" in candidate) || !("inputSource" in candidate)) {
-    return null;
-  }
+  if (!("frame" in candidate) || !("inputSource" in candidate)) return null;
   return candidate as InputSourceEventLike;
 }
+
+// ---- Scene picking helpers ----
 
 function pickFirstSelectable(intersections: Object3D[]): SelectableTarget | null {
   for (const object of intersections) {
@@ -385,11 +474,7 @@ function pickFirstSelectable(intersections: Object3D[]): SelectableTarget | null
       const selectableType = readSelectableType(cursor);
       const selectableId = readSelectableId(cursor);
       if (selectableType && selectableId) {
-        return {
-          kind: selectableType,
-          id: selectableId,
-          object: cursor
-        };
+        return { kind: selectableType, id: selectableId, object: cursor };
       }
       cursor = cursor.parent;
     }
@@ -407,18 +492,23 @@ function readSelectableId(object: Object3D): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
-function applyHighlightToMaterial(
+// ---- Material state application ----
+
+function applyMaterialState(
   material: Material,
-  highlighted: boolean,
+  state: VisualState,
   defaultColors: WeakMap<Material, number>
 ): void {
   if (material instanceof MeshStandardMaterial) {
     if (!defaultColors.has(material)) {
       defaultColors.set(material, material.color.getHex());
     }
-    if (highlighted) {
+    if (state === "selected") {
       material.emissive.setHex(0x2c6b8b);
       material.emissiveIntensity = 0.9;
+    } else if (state === "hover") {
+      material.emissive.setHex(0x1a5566);
+      material.emissiveIntensity = 0.45;
     } else {
       material.emissive.setHex(0x000000);
       material.emissiveIntensity = 0;
@@ -434,9 +524,12 @@ function applyHighlightToMaterial(
     if (!defaultColors.has(material)) {
       defaultColors.set(material, material.color.getHex());
     }
-    if (highlighted) {
+    if (state === "selected") {
       material.color.setHex(0x72e1ff);
       material.opacity = 1;
+    } else if (state === "hover") {
+      material.color.setHex(0x55ccee);
+      material.opacity = 0.9;
     } else {
       const original = defaultColors.get(material);
       if (typeof original === "number") {

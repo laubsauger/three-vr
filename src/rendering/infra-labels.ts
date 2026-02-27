@@ -4,6 +4,7 @@
  */
 
 import {
+  Camera,
   CanvasTexture,
   Group,
   Sprite,
@@ -13,6 +14,15 @@ import {
 
 import type { RenderGraphView, RenderNodeView, RenderLinkView } from "../topology";
 import type { HealthState } from "../contracts/domain";
+
+const NODE_LABEL_LOD_TRIGGER = 48;
+const LINK_LABEL_LOD_TRIGGER = 72;
+const MAX_VISIBLE_NODE_LABELS = 24;
+const MAX_VISIBLE_LINK_LABELS = 36;
+const MAX_VISIBLE_NEAR_NODE_LABELS = 12;
+const MAX_VISIBLE_NEAR_LINK_LABELS = 18;
+const MAX_NODE_LABEL_DISTANCE = 2.8;
+const MAX_LINK_LABEL_DISTANCE = 2.3;
 
 interface LabelEntry {
   sprite: Sprite;
@@ -24,6 +34,7 @@ export class InfraLabelManager {
   private readonly root = new Group();
   private readonly nodeLabels = new Map<string, LabelEntry>();
   private readonly linkLabels = new Map<string, LabelEntry>();
+  private readonly tmpCameraPos = new Vector3();
 
   constructor() {
     this.root.name = "infra-labels";
@@ -41,15 +52,18 @@ export class InfraLabelManager {
     nodePositions: Map<string, Vector3>,
     linkMidpoints: Map<string, Vector3>,
   ): void {
+    const visibleNodes = selectVisibleNodeLabels(graph.nodes);
+    const visibleLinks = selectVisibleLinkLabels(graph.links);
+
     // ---- Node labels ----
-    const nextNodeIds = new Set(graph.nodes.map((n) => n.id));
+    const nextNodeIds = new Set(visibleNodes.map((n) => n.id));
     for (const [id, entry] of this.nodeLabels) {
       if (!nextNodeIds.has(id)) {
         this.disposeEntry(entry);
         this.nodeLabels.delete(id);
       }
     }
-    for (const node of graph.nodes) {
+    for (const node of visibleNodes) {
       let entry = this.nodeLabels.get(node.id);
       if (!entry) {
         entry = createEntry(256, 96, 0.18, 0.07);
@@ -64,14 +78,14 @@ export class InfraLabelManager {
     }
 
     // ---- Link labels ----
-    const nextLinkIds = new Set(graph.links.map((l) => l.id));
+    const nextLinkIds = new Set(visibleLinks.map((l) => l.id));
     for (const [id, entry] of this.linkLabels) {
       if (!nextLinkIds.has(id)) {
         this.disposeEntry(entry);
         this.linkLabels.delete(id);
       }
     }
-    for (const link of graph.links) {
+    for (const link of visibleLinks) {
       let entry = this.linkLabels.get(link.id);
       if (!entry) {
         entry = createEntry(256, 72, 0.15, 0.042);
@@ -92,6 +106,22 @@ export class InfraLabelManager {
     this.nodeLabels.clear();
     this.linkLabels.clear();
     this.root.removeFromParent();
+  }
+
+  updateVisibility(camera: Camera): void {
+    camera.getWorldPosition(this.tmpCameraPos);
+    applyDistanceCulling(
+      this.nodeLabels,
+      this.tmpCameraPos,
+      MAX_NODE_LABEL_DISTANCE,
+      MAX_VISIBLE_NEAR_NODE_LABELS
+    );
+    applyDistanceCulling(
+      this.linkLabels,
+      this.tmpCameraPos,
+      MAX_LINK_LABEL_DISTANCE,
+      MAX_VISIBLE_NEAR_LINK_LABELS
+    );
   }
 
   private disposeEntry(entry: LabelEntry): void {
@@ -258,4 +288,69 @@ function healthColor(health: HealthState, alpha: number): string {
 
 function truncate(text: string, maxLen: number): string {
   return text.length > maxLen ? text.slice(0, maxLen - 1) + "\u2026" : text;
+}
+
+function selectVisibleNodeLabels(nodes: RenderNodeView[]): RenderNodeView[] {
+  if (nodes.length <= NODE_LABEL_LOD_TRIGGER) {
+    return nodes;
+  }
+
+  return [...nodes]
+    .sort((a, b) =>
+      compareHealthPriority(a.health, b.health) ||
+      b.packetLossPct - a.packetLossPct ||
+      b.latencyMs - a.latencyMs ||
+      b.throughputMbps - a.throughputMbps
+    )
+    .slice(0, MAX_VISIBLE_NODE_LABELS);
+}
+
+function selectVisibleLinkLabels(links: RenderLinkView[]): RenderLinkView[] {
+  if (links.length <= LINK_LABEL_LOD_TRIGGER) {
+    return links;
+  }
+
+  return [...links]
+    .sort((a, b) =>
+      compareHealthPriority(a.health, b.health) ||
+      b.packetLossPct - a.packetLossPct ||
+      b.latencyMs - a.latencyMs ||
+      b.utilizationPct - a.utilizationPct
+    )
+    .slice(0, MAX_VISIBLE_LINK_LABELS);
+}
+
+function compareHealthPriority(a: HealthState, b: HealthState): number {
+  return healthPriority(b) - healthPriority(a);
+}
+
+function healthPriority(health: HealthState): number {
+  if (health === "down") return 3;
+  if (health === "degraded") return 2;
+  if (health === "up") return 1;
+  return 0;
+}
+
+function applyDistanceCulling(
+  labels: Map<string, LabelEntry>,
+  cameraPos: Vector3,
+  maxDistance: number,
+  maxVisible: number
+): void {
+  const maxDistanceSq = maxDistance * maxDistance;
+  const ranked: Array<{ entry: LabelEntry; distSq: number }> = [];
+
+  for (const entry of labels.values()) {
+    const distSq = entry.sprite.position.distanceToSquared(cameraPos);
+    entry.sprite.visible = false;
+    if (distSq <= maxDistanceSq) {
+      ranked.push({ entry, distSq });
+    }
+  }
+
+  ranked.sort((a, b) => a.distSq - b.distSq);
+  const visibleCount = Math.min(maxVisible, ranked.length);
+  for (let i = 0; i < visibleCount; i++) {
+    ranked[i].entry.sprite.visible = true;
+  }
 }

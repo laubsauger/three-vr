@@ -26,6 +26,13 @@ export interface CameraWorkerDetectorOptions {
 
 export type CameraWorkerDetectorStatus = "idle" | "starting" | "ready" | "failed";
 
+const DEFAULT_MARKER_SIZE_METERS = 0.12;
+const ASSUMED_CAMERA_FOV_Y_RAD = (70 * Math.PI) / 180;
+const MIN_ESTIMATED_DISTANCE_METERS = 0.25;
+const MAX_ESTIMATED_DISTANCE_METERS = 8.0;
+const DESKTOP_CAMERA_WORLD_POS = { x: 0, y: 1.4, z: 2.5 };
+const IDENTITY_ROTATION = { x: 0, y: 0, z: 0, w: 1 };
+
 /**
  * Camera-backed detector scaffold.
  * Uses a worker to extract fiducial candidates from environment camera frames.
@@ -52,8 +59,8 @@ export class CameraWorkerMarkerDetector implements MarkerDetector {
   private startFailed = false;
 
   constructor(options: CameraWorkerDetectorOptions = {}) {
-    this.captureWidth = options.captureWidth ?? 640;
-    this.captureHeight = options.captureHeight ?? 480;
+    this.captureWidth = options.captureWidth ?? 480;
+    this.captureHeight = options.captureHeight ?? 360;
     this.minCaptureDeltaMs = 1000 / (options.maxCaptureHz ?? 8);
     this.staleThresholdMs = options.staleThresholdMs ?? 550;
   }
@@ -75,7 +82,16 @@ export class CameraWorkerMarkerDetector implements MarkerDetector {
       return [];
     }
 
-    return this.latestDetections.map((detection) => toRawMarkerDetection(detection, now));
+    return this.latestDetections.map((detection) =>
+      toRawMarkerDetection(
+        detection,
+        now,
+        this.captureWidth,
+        this.captureHeight,
+        _frame,
+        _referenceSpace
+      )
+    );
   }
 
   getVideo(): HTMLVideoElement | null {
@@ -344,23 +360,249 @@ export class SwitchableDetector implements MarkerDetector {
   }
 }
 
-function toRawMarkerDetection(detection: WorkerDetection, nowMs: number): RawMarkerDetection {
-  const spreadX = (detection.xNorm - 0.5) * 1.8;
-  const spreadY = (0.5 - detection.yNorm) * 0.9;
-  const depth = -1.05 - detection.sizeNorm * 1.25;
+function toRawMarkerDetection(
+  detection: WorkerDetection,
+  nowMs: number,
+  captureWidth: number,
+  captureHeight: number,
+  frame: unknown,
+  referenceSpace: unknown,
+): RawMarkerDetection {
+  const aspect = captureWidth / Math.max(1, captureHeight);
+  const tanHalfFovY = Math.tan(ASSUMED_CAMERA_FOV_Y_RAD * 0.5);
+  const tanHalfFovX = tanHalfFovY * aspect;
+  const focalPxY = captureHeight / (2 * tanHalfFovY);
+  const markerSidePx = estimateMarkerSidePixels(detection, captureWidth, captureHeight);
+  const estimatedDistance = clamp(
+    (DEFAULT_MARKER_SIZE_METERS * focalPxY) / Math.max(1, markerSidePx),
+    MIN_ESTIMATED_DISTANCE_METERS,
+    MAX_ESTIMATED_DISTANCE_METERS
+  );
+
+  const ndcX = (detection.xNorm - 0.5) * 2;
+  const ndcY = (0.5 - detection.yNorm) * 2;
+  const cameraRelative = {
+    x: ndcX * estimatedDistance * tanHalfFovX,
+    y: ndcY * estimatedDistance * tanHalfFovY,
+    z: -estimatedDistance,
+  };
+
+  const viewer = resolveViewerTransform(frame, referenceSpace) ?? {
+    position: DESKTOP_CAMERA_WORLD_POS,
+    rotation: IDENTITY_ROTATION
+  };
+
+  const rotation = detection.corners && detection.corners.length >= 4
+    ? estimateRotationFromCorners(detection.corners, captureWidth, captureHeight)
+    : IDENTITY_ROTATION;
+  const worldRotation = multiplyQuat(viewer.rotation, rotation);
+  const worldPosition = addVec3(
+    viewer.position,
+    rotateVecByQuat(cameraRelative, viewer.rotation)
+  );
 
   return {
     markerId: detection.markerId,
     pose: {
-      position: {
-        x: spreadX,
-        y: 1.35 + spreadY,
-        z: depth
-      },
-      rotation: { x: 0, y: 0, z: 0, w: 1 },
+      position: worldPosition,
+      rotation: worldRotation,
       confidence: detection.confidence,
       lastSeenAtMs: nowMs
     },
-    sizeMeters: Math.max(0.08, detection.sizeNorm)
+    sizeMeters: DEFAULT_MARKER_SIZE_METERS
   };
+}
+
+/**
+ * Estimate marker orientation from the 4 detected corner positions.
+ * Uses perspective distortion cues:
+ *   - Roll: angle of the top edge in image space
+ *   - Pitch: ratio of top/bottom edge lengths (foreshortening)
+ *   - Yaw: ratio of left/right edge lengths (foreshortening)
+ * Returns a quaternion (ZYX Euler convention).
+ */
+function estimateRotationFromCorners(
+  corners: Array<{ x: number; y: number }>,
+  _width: number,
+  _height: number,
+): { x: number; y: number; z: number; w: number } {
+  const [c0, c1, c2, c3] = corners;
+
+  // Roll: average angle of top and bottom edges
+  // Image Y is down, world Y is up → negate
+  const topDx = c1.x - c0.x;
+  const topDy = c1.y - c0.y;
+  const botDx = c2.x - c3.x;
+  const botDy = c2.y - c3.y;
+  const avgDx = (topDx + botDx) / 2;
+  const avgDy = (topDy + botDy) / 2;
+  const roll = -Math.atan2(avgDy, avgDx);
+
+  // Edge lengths for perspective foreshortening
+  const topLen = Math.hypot(c1.x - c0.x, c1.y - c0.y);
+  const bottomLen = Math.hypot(c2.x - c3.x, c2.y - c3.y);
+  const leftLen = Math.hypot(c3.x - c0.x, c3.y - c0.y);
+  const rightLen = Math.hypot(c2.x - c1.x, c2.y - c1.y);
+
+  const avgH = (topLen + bottomLen) / 2;
+  const avgV = (leftLen + rightLen) / 2;
+
+  // Pitch: top edge shorter than bottom → marker tilts backward
+  const pitch = avgH > 1 ? Math.atan2(bottomLen - topLen, avgH) : 0;
+  // Yaw: left edge shorter than right → marker turns left
+  const yaw = avgV > 1 ? Math.atan2(rightLen - leftLen, avgV) : 0;
+
+  return eulerZYXToQuaternion(pitch, yaw, roll);
+}
+
+/** Convert ZYX Euler angles (pitch=X, yaw=Y, roll=Z) to a quaternion. */
+function eulerZYXToQuaternion(
+  x: number,
+  y: number,
+  z: number,
+): { x: number; y: number; z: number; w: number } {
+  const cx = Math.cos(x / 2);
+  const sx = Math.sin(x / 2);
+  const cy = Math.cos(y / 2);
+  const sy = Math.sin(y / 2);
+  const cz = Math.cos(z / 2);
+  const sz = Math.sin(z / 2);
+
+  return {
+    x: sx * cy * cz - cx * sy * sz,
+    y: cx * sy * cz + sx * cy * sz,
+    z: cx * cy * sz - sx * sy * cz,
+    w: cx * cy * cz + sx * sy * sz,
+  };
+}
+
+function estimateMarkerSidePixels(
+  detection: WorkerDetection,
+  captureWidth: number,
+  captureHeight: number
+): number {
+  if (detection.corners && detection.corners.length >= 4) {
+    const [c0, c1, c2, c3] = detection.corners;
+    const top = Math.hypot(c1.x - c0.x, c1.y - c0.y);
+    const right = Math.hypot(c2.x - c1.x, c2.y - c1.y);
+    const bottom = Math.hypot(c2.x - c3.x, c2.y - c3.y);
+    const left = Math.hypot(c3.x - c0.x, c3.y - c0.y);
+    return (top + right + bottom + left) / 4;
+  }
+
+  return detection.sizeNorm * Math.max(captureWidth, captureHeight);
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+function addVec3(
+  a: { x: number; y: number; z: number },
+  b: { x: number; y: number; z: number }
+): { x: number; y: number; z: number } {
+  return { x: a.x + b.x, y: a.y + b.y, z: a.z + b.z };
+}
+
+function rotateVecByQuat(
+  v: { x: number; y: number; z: number },
+  q: { x: number; y: number; z: number; w: number }
+): { x: number; y: number; z: number } {
+  const x = v.x;
+  const y = v.y;
+  const z = v.z;
+  const qx = q.x;
+  const qy = q.y;
+  const qz = q.z;
+  const qw = q.w;
+
+  const tx = 2 * (qy * z - qz * y);
+  const ty = 2 * (qz * x - qx * z);
+  const tz = 2 * (qx * y - qy * x);
+
+  return {
+    x: x + qw * tx + (qy * tz - qz * ty),
+    y: y + qw * ty + (qz * tx - qx * tz),
+    z: z + qw * tz + (qx * ty - qy * tx),
+  };
+}
+
+function multiplyQuat(
+  a: { x: number; y: number; z: number; w: number },
+  b: { x: number; y: number; z: number; w: number }
+): { x: number; y: number; z: number; w: number } {
+  return {
+    x: a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+    y: a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+    z: a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+    w: a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+  };
+}
+
+function resolveViewerTransform(
+  frame: unknown,
+  referenceSpace: unknown
+): {
+  position: { x: number; y: number; z: number };
+  rotation: { x: number; y: number; z: number; w: number };
+} | null {
+  if (!frame || typeof frame !== "object") {
+    return null;
+  }
+
+  const frameLike = frame as { getViewerPose?: (refSpace: unknown) => unknown };
+  if (typeof frameLike.getViewerPose !== "function") {
+    return null;
+  }
+
+  const viewerPose = frameLike.getViewerPose(referenceSpace);
+  if (!viewerPose || typeof viewerPose !== "object") {
+    return null;
+  }
+
+  const transform = (viewerPose as { transform?: unknown }).transform;
+  if (!transform || typeof transform !== "object") {
+    return null;
+  }
+
+  const position = (transform as { position?: unknown }).position;
+  const orientation = (transform as { orientation?: unknown }).orientation;
+  if (!isVec3Like(position) || !isQuatLike(orientation)) {
+    return null;
+  }
+
+  return {
+    position: {
+      x: position.x,
+      y: position.y,
+      z: position.z
+    },
+    rotation: {
+      x: orientation.x,
+      y: orientation.y,
+      z: orientation.z,
+      w: orientation.w
+    }
+  };
+}
+
+function isVec3Like(value: unknown): value is { x: number; y: number; z: number } {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const v = value as { x?: unknown; y?: unknown; z?: unknown };
+  return typeof v.x === "number" && typeof v.y === "number" && typeof v.z === "number";
+}
+
+function isQuatLike(value: unknown): value is { x: number; y: number; z: number; w: number } {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const q = value as { x?: unknown; y?: unknown; z?: unknown; w?: unknown };
+  return (
+    typeof q.x === "number" &&
+    typeof q.y === "number" &&
+    typeof q.z === "number" &&
+    typeof q.w === "number"
+  );
 }
