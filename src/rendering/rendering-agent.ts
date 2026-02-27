@@ -19,7 +19,9 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
   let unsubscribeTopology: (() => void) | null = null;
   let unsubscribeMarkers: (() => void) | null = null;
   let unsubscribeXrState: (() => void) | null = null;
+  let unsubscribeXrFrame: (() => void) | null = null;
   let animationHandle = 0;
+  let xrRunning = false;
 
   // Load KML if provided
   if (options.kmlText) {
@@ -31,7 +33,9 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
   const markerQuat = new Quaternion();
 
   const animate = (timeMs: number): void => {
-    renderer.tick(timeMs);
+    if (!xrRunning) {
+      renderer.tick(timeMs);
+    }
     animationHandle = window.requestAnimationFrame(animate);
   };
 
@@ -67,6 +71,7 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
         });
 
         unsubscribeXrState = context.events.on("xr/state", (payload) => {
+          xrRunning = payload.state === "running";
           if (payload.state === "running") {
             renderer.setBoundaryPolygon(context.xrRuntime.getBoundaryPolygon());
           } else {
@@ -74,8 +79,17 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
           }
         });
 
+        unsubscribeXrFrame = context.events.on("xr/frame", (payload) => {
+          if (xrRunning) {
+            renderer.tick(payload.time);
+          }
+        });
+
         if (context.xrRuntime.getState() === "running") {
+          xrRunning = true;
           renderer.setBoundaryPolygon(context.xrRuntime.getBoundaryPolygon());
+        } else {
+          xrRunning = false;
         }
 
         animationHandle = window.requestAnimationFrame(animate);
@@ -103,6 +117,10 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
       if (unsubscribeXrState) {
         unsubscribeXrState();
         unsubscribeXrState = null;
+      }
+      if (unsubscribeXrFrame) {
+        unsubscribeXrFrame();
+        unsubscribeXrFrame = null;
       }
       if (animationHandle) {
         window.cancelAnimationFrame(animationHandle);

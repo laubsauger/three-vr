@@ -1,5 +1,6 @@
 import type { AgentSuite } from "./integration";
 import { createTrackingAgent } from "../tracking";
+import type { MarkerDetector } from "../tracking";
 import { createTopologyAgent } from "../topology";
 import { createTelemetryAgent } from "../telemetry";
 import { createRenderingAgent } from "../rendering";
@@ -12,11 +13,13 @@ export interface DefaultAgentSuiteOptions {
   renderer: WebGLRenderer;
   /** Raw KML text to render as a map overlay on detected markers. */
   kmlText?: string;
+  /** Custom marker detector (e.g. SwitchableDetector for toggling camera/mock). */
+  detector?: MarkerDetector;
 }
 
 export function createDefaultAgentSuite(options: DefaultAgentSuiteOptions): AgentSuite {
   return {
-    tracking: createTrackingAgent(),
+    tracking: createTrackingAgent(options.detector ? { detector: options.detector } : undefined),
     topology: createTopologyAgent(),
     telemetry: createTelemetryAgent(),
     rendering: createRenderingAgent({

@@ -7,6 +7,7 @@ import {
   MeshStandardMaterial,
   PerspectiveCamera,
   Scene,
+  VideoTexture,
   WebGLRenderer
 } from "three";
 
@@ -18,6 +19,7 @@ import { PerformanceMonitor } from "./performance-monitor";
 import { createDefaultAgentSuite } from "./agent-suite";
 import { createIntegrationCoordinator } from "./integration";
 import { selectRenderGraphView, selectTopologyStats } from "../topology";
+import { SwitchableDetector } from "../tracking";
 import kmlText from "../../docs/bombay-beach-feb-27-2026.kml?raw";
 
 function toLabel(state: XrRuntimeState): string {
@@ -95,6 +97,24 @@ export async function bootstrapApp(): Promise<void> {
   stopButton.style.color = "white";
   stopButton.style.cursor = "pointer";
 
+  const cameraTrackButton = document.createElement("button");
+  cameraTrackButton.textContent = "Start Camera Tracking";
+  cameraTrackButton.style.padding = "8px 12px";
+  cameraTrackButton.style.borderRadius = "8px";
+  cameraTrackButton.style.border = "1px solid #1e7353";
+  cameraTrackButton.style.background = "#0f4830";
+  cameraTrackButton.style.color = "white";
+  cameraTrackButton.style.cursor = "pointer";
+
+  const mockToggle = document.createElement("button");
+  mockToggle.textContent = "Mode: Camera";
+  mockToggle.style.padding = "8px 12px";
+  mockToggle.style.borderRadius = "8px";
+  mockToggle.style.border = "1px solid #4a4a6a";
+  mockToggle.style.background = "#2a2a3f";
+  mockToggle.style.color = "white";
+  mockToggle.style.cursor = "pointer";
+
   const stateLabel = document.createElement("div");
   stateLabel.style.fontSize = "14px";
   stateLabel.style.padding = "8px 0";
@@ -166,8 +186,18 @@ export async function bootstrapApp(): Promise<void> {
   canvasHolder.style.borderRadius = "12px";
   canvasHolder.style.overflow = "hidden";
   canvasHolder.style.border = "1px solid rgba(92, 128, 138, 0.4)";
+  canvasHolder.style.position = "relative";
 
-  toolbar.append(startButton, stopButton);
+  const overlayCanvas = document.createElement("canvas");
+  overlayCanvas.style.position = "absolute";
+  overlayCanvas.style.top = "0";
+  overlayCanvas.style.left = "0";
+  overlayCanvas.style.width = "100%";
+  overlayCanvas.style.height = "100%";
+  overlayCanvas.style.pointerEvents = "none";
+  const overlayCtx = overlayCanvas.getContext("2d");
+
+  toolbar.append(startButton, stopButton, cameraTrackButton, mockToggle);
   wrapper.append(
     toolbar,
     stateLabel,
@@ -199,7 +229,9 @@ export async function bootstrapApp(): Promise<void> {
   const renderer = new WebGLRenderer({ antialias: true, alpha: true });
   renderer.setPixelRatio(window.devicePixelRatio);
   renderer.setSize(window.innerWidth, window.innerHeight * 0.75);
-  canvasHolder.append(renderer.domElement);
+  canvasHolder.append(renderer.domElement, overlayCanvas);
+  overlayCanvas.width = renderer.domElement.width;
+  overlayCanvas.height = renderer.domElement.height;
 
   const ambient = new AmbientLight(0xffffff, 0.5);
   const keyLight = new DirectionalLight(0xffffff, 1.0);
@@ -241,6 +273,8 @@ export async function bootstrapApp(): Promise<void> {
     frameStats.textContent = `[${payload.code}] ${payload.message}`;
   });
 
+  const switchableDetector = new SwitchableDetector("camera");
+
   const integrationCoordinator = createIntegrationCoordinator(
     {
       events,
@@ -251,6 +285,7 @@ export async function bootstrapApp(): Promise<void> {
       camera,
       renderer,
       kmlText,
+      detector: switchableDetector,
     })
   );
 
@@ -300,6 +335,10 @@ export async function bootstrapApp(): Promise<void> {
   };
 
   let desktopLoopHandle = 0;
+  let desktopTrackingActive = false;
+  const defaultBackground = scene.background;
+  let videoTexture: VideoTexture | null = null;
+
   const desktopLoop = (time: number): void => {
     if (xrRuntime.getState() !== "running") {
       const deltaMs = lastDesktopFrameTime === 0 ? 0 : time - lastDesktopFrameTime;
@@ -308,6 +347,35 @@ export async function bootstrapApp(): Promise<void> {
         desktopPerformance.recordFrame(time, deltaMs);
       }
       emitPerformance("desktop", time);
+
+      if (desktopTrackingActive) {
+        events.emit("xr/frame", {
+          time,
+          deltaMs,
+          frame: null,
+          referenceSpace: null,
+        });
+
+        // Attach camera feed as scene background once the video is ready
+        if (!videoTexture && switchableDetector.getMode() === "camera") {
+          const video = switchableDetector.camera.getVideo();
+          if (video && video.readyState >= 2) {
+            videoTexture = new VideoTexture(video);
+            scene.background = videoTexture;
+          }
+        }
+        if (videoTexture) {
+          videoTexture.needsUpdate = true;
+        }
+      }
+
+      // Draw marker overlay
+      if (overlayCtx && desktopTrackingActive && switchableDetector.getMode() === "camera") {
+        drawMarkerOverlay(overlayCtx, overlayCanvas, switchableDetector);
+      } else if (overlayCtx) {
+        overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+      }
+
       box.rotation.y = time * 0.00035;
       box.rotation.x = time * 0.0002;
       renderer.render(scene, camera);
@@ -345,7 +413,9 @@ export async function bootstrapApp(): Promise<void> {
     trackingStats.textContent =
       payload.markers.length > 0
         ? `Tracking markers: ${payload.markers.length} [${markerIds}]`
-        : "Tracking markers: 0 (requires active XR session)";
+        : desktopTrackingActive
+          ? "Tracking markers: 0 (scanning...)"
+          : "Tracking markers: 0 (requires active XR session)";
 
     const visible = new Set<number>();
     for (const marker of payload.markers) {
@@ -461,10 +531,59 @@ export async function bootstrapApp(): Promise<void> {
     }
   });
 
+  cameraTrackButton.addEventListener("click", () => {
+    if (desktopTrackingActive) {
+      desktopTrackingActive = false;
+      cameraTrackButton.textContent = "Start Camera Tracking";
+      cameraTrackButton.style.border = "1px solid #1e7353";
+      cameraTrackButton.style.background = "#0f4830";
+      trackingStats.textContent = "Tracking markers: 0";
+
+      // Restore default background
+      if (videoTexture) {
+        videoTexture.dispose();
+        videoTexture = null;
+      }
+      scene.background = defaultBackground;
+    } else {
+      desktopTrackingActive = true;
+      cameraTrackButton.textContent = "Stop Camera Tracking";
+      cameraTrackButton.style.border = "1px solid #7a6a2a";
+      cameraTrackButton.style.background = "#5a4a1f";
+      trackingStats.textContent =
+        switchableDetector.getMode() === "mock"
+          ? "Tracking markers: 0 (mock active)"
+          : "Tracking markers: 0 (starting camera...)";
+    }
+  });
+
+  mockToggle.addEventListener("click", () => {
+    if (switchableDetector.getMode() === "camera") {
+      switchableDetector.setMode("mock");
+      mockToggle.textContent = "Mode: Mock";
+      mockToggle.style.border = "1px solid #6a5a2a";
+      mockToggle.style.background = "#3f3520";
+      // Drop video background in mock mode
+      if (videoTexture) {
+        videoTexture.dispose();
+        videoTexture = null;
+      }
+      scene.background = defaultBackground;
+    } else {
+      switchableDetector.setMode("camera");
+      mockToggle.textContent = "Mode: Camera";
+      mockToggle.style.border = "1px solid #4a4a6a";
+      mockToggle.style.background = "#2a2a3f";
+      // Video background will be picked up by the desktop loop
+    }
+  });
+
   window.addEventListener("resize", () => {
     camera.aspect = window.innerWidth / Math.max(window.innerHeight, 1);
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight * 0.75);
+    overlayCanvas.width = renderer.domElement.width;
+    overlayCanvas.height = renderer.domElement.height;
   });
 
   window.addEventListener("beforeunload", () => {
@@ -508,4 +627,85 @@ function renderCalibrationPanel(
     label.textContent = "Calibration: acquiring stable marker lock";
   }
   panel.textContent = lines.join("\n");
+}
+
+function drawMarkerOverlay(
+  ctx: CanvasRenderingContext2D,
+  canvas: HTMLCanvasElement,
+  detector: import("../tracking").SwitchableDetector
+): void {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  const overlay = detector.camera.getOverlayData();
+  if (overlay.detections.length === 0) return;
+
+  // Scale from detector capture coords → overlay canvas coords
+  const sx = canvas.width / overlay.width;
+  const sy = canvas.height / overlay.height;
+
+  for (const det of overlay.detections) {
+    const corners = det.corners;
+    if (!corners || corners.length < 4) continue;
+
+    const isBest = det.markerId === overlay.bestId;
+
+    // Draw quad outline
+    ctx.beginPath();
+    ctx.moveTo(corners[0].x * sx, corners[0].y * sy);
+    for (let i = 1; i < corners.length; i++) {
+      ctx.lineTo(corners[i].x * sx, corners[i].y * sy);
+    }
+    ctx.closePath();
+
+    ctx.lineWidth = isBest ? 3 : 1.5;
+    ctx.strokeStyle = isBest ? "#00ff88" : "#ffaa33";
+    ctx.stroke();
+
+    // Fill with translucent highlight
+    ctx.fillStyle = isBest ? "rgba(0, 255, 136, 0.12)" : "rgba(255, 170, 51, 0.08)";
+    ctx.fill();
+
+    // Draw corner dots
+    for (const corner of corners) {
+      ctx.beginPath();
+      ctx.arc(corner.x * sx, corner.y * sy, isBest ? 4 : 2.5, 0, Math.PI * 2);
+      ctx.fillStyle = isBest ? "#00ff88" : "#ffaa33";
+      ctx.fill();
+    }
+
+    // ID label
+    const cx = corners.reduce((s, c) => s + c.x, 0) / corners.length * sx;
+    const cy = corners.reduce((s, c) => s + c.y, 0) / corners.length * sy;
+
+    const label = `ID ${det.markerId}`;
+    ctx.font = isBest ? "bold 16px monospace" : "12px monospace";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+
+    // Background pill
+    const metrics = ctx.measureText(label);
+    const pw = metrics.width + 12;
+    const ph = isBest ? 22 : 18;
+    ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
+    ctx.beginPath();
+    ctx.roundRect(cx - pw / 2, cy - ph / 2, pw, ph, 4);
+    ctx.fill();
+
+    ctx.fillStyle = isBest ? "#00ff88" : "#ffaa33";
+    ctx.fillText(label, cx, cy);
+
+    // Confidence badge for best
+    if (isBest) {
+      const confLabel = `${(det.confidence * 100).toFixed(0)}%`;
+      ctx.font = "11px monospace";
+      const confY = cy + ph / 2 + 12;
+      ctx.fillStyle = "rgba(0, 0, 0, 0.6)";
+      const cm = ctx.measureText(confLabel);
+      ctx.beginPath();
+      ctx.roundRect(cx - cm.width / 2 - 4, confY - 7, cm.width + 8, 14, 3);
+      ctx.fill();
+      ctx.fillStyle = "#00ff88";
+      ctx.fillText(confLabel, cx, confY);
+    }
+  }
 }

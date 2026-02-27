@@ -14,6 +14,7 @@ interface DetectResponseMessage {
   type: "detected";
   frameId: number;
   detections: WorkerDetection[];
+  bestId: number | null;
 }
 
 export interface CameraWorkerDetectorOptions {
@@ -42,6 +43,7 @@ export class CameraWorkerMarkerDetector implements MarkerDetector {
   private canvas: HTMLCanvasElement | null = null;
   private context2d: CanvasRenderingContext2D | null = null;
   private latestDetections: WorkerDetection[] = [];
+  private latestBestId: number | null = null;
   private latestAtMs = 0;
   private frameCounter = 0;
   private workerBusy = false;
@@ -74,6 +76,20 @@ export class CameraWorkerMarkerDetector implements MarkerDetector {
     }
 
     return this.latestDetections.map((detection) => toRawMarkerDetection(detection, now));
+  }
+
+  getVideo(): HTMLVideoElement | null {
+    return this.video;
+  }
+
+  /** Latest detections with pixel-space corners for overlay drawing. */
+  getOverlayData(): { detections: WorkerDetection[]; bestId: number | null; width: number; height: number } {
+    return {
+      detections: this.latestDetections,
+      bestId: this.latestBestId,
+      width: this.captureWidth,
+      height: this.captureHeight,
+    };
   }
 
   getStatus(): CameraWorkerDetectorStatus {
@@ -173,6 +189,7 @@ export class CameraWorkerMarkerDetector implements MarkerDetector {
           return;
         }
         this.latestDetections = payload.detections;
+        this.latestBestId = payload.bestId;
         this.latestAtMs = performance.now();
         this.workerBusy = false;
       });
@@ -262,6 +279,44 @@ export class MockMarkerDetector implements MarkerDetector {
 
   dispose(): void {
     // Nothing to clean up for mock.
+  }
+}
+
+export type SwitchableMode = "camera" | "mock";
+
+/**
+ * Wraps a real camera detector and a mock detector, delegating to
+ * whichever is currently active. Allows live toggling at runtime.
+ */
+export class SwitchableDetector implements MarkerDetector {
+  private mode: SwitchableMode;
+  readonly camera: CameraWorkerMarkerDetector;
+  readonly mock: MockMarkerDetector;
+
+  constructor(initialMode: SwitchableMode = "camera") {
+    this.mode = initialMode;
+    this.camera = new CameraWorkerMarkerDetector();
+    this.mock = new MockMarkerDetector();
+  }
+
+  getMode(): SwitchableMode {
+    return this.mode;
+  }
+
+  setMode(mode: SwitchableMode): void {
+    this.mode = mode;
+  }
+
+  detect(frame: unknown, referenceSpace: unknown): RawMarkerDetection[] {
+    if (this.mode === "mock") {
+      return this.mock.detect(frame, referenceSpace);
+    }
+    return this.camera.detect(frame, referenceSpace);
+  }
+
+  dispose(): void {
+    this.camera.dispose();
+    this.mock.dispose();
   }
 }
 

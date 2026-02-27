@@ -16,15 +16,16 @@ import {
 import type { RenderGraphView, RenderLinkView, RenderNodeView } from "../topology";
 import type { TrackedMarker, XrBoundaryPoint } from "../contracts";
 
+const LINK_SEGMENT_COUNT = 12;
+
 interface LinkVisualState {
   group: Group;
-  beam: Mesh<CylinderGeometry, MeshStandardMaterial>;
+  segments: Array<Mesh<CylinderGeometry, MeshStandardMaterial>>;
   packetA: Mesh<SphereGeometry, MeshStandardMaterial>;
   packetB: Mesh<SphereGeometry, MeshStandardMaterial>;
   flowHz: number;
   beamRadius: number;
-  from: Vector3;
-  to: Vector3;
+  path: Vector3[];
   phase: number;
 }
 
@@ -83,20 +84,26 @@ export class InfraSceneRenderer {
   tick(timeMs: number): void {
     const timeSec = timeMs / 1000;
     for (const visual of this.linkMeshes.values()) {
-      const bodyPulse =
-        0.4 + 0.6 * (0.5 + 0.5 * Math.sin((timeSec * visual.flowHz + visual.phase) * Math.PI * 2));
-      visual.beam.material.opacity = 0.32 + bodyPulse * 0.3;
-      visual.beam.material.emissiveIntensity = 0.2 + bodyPulse * 0.45;
+      const basePulse =
+        0.42 + 0.58 * (0.5 + 0.5 * Math.sin((timeSec * visual.flowHz + visual.phase) * Math.PI * 2));
+
+      for (let i = 0; i < visual.segments.length; i++) {
+        const segment = visual.segments[i];
+        const offset = i / Math.max(visual.segments.length - 1, 1);
+        const stagger = 0.82 + 0.18 * Math.sin((timeSec * visual.flowHz + visual.phase + offset) * Math.PI * 2);
+        segment.material.opacity = 0.28 + basePulse * 0.28 * stagger;
+        segment.material.emissiveIntensity = 0.16 + basePulse * 0.42 * stagger;
+      }
 
       const packetLead = fract(timeSec * visual.flowHz + visual.phase);
       const packetTrail = fract(packetLead + 0.5);
-      setPositionAt(visual.packetA.position, visual.from, visual.to, packetLead);
-      setPositionAt(visual.packetB.position, visual.from, visual.to, packetTrail);
+      setPositionOnPath(visual.packetA.position, visual.path, packetLead);
+      setPositionOnPath(visual.packetB.position, visual.path, packetTrail);
 
       const packetFlash =
         0.5 + 0.5 * Math.sin((timeSec * visual.flowHz + visual.phase + 0.15) * Math.PI * 4);
-      visual.packetA.material.emissiveIntensity = 0.8 + packetFlash * 0.9;
-      visual.packetB.material.emissiveIntensity = 0.8 + packetFlash * 0.9;
+      visual.packetA.material.emissiveIntensity = 0.84 + packetFlash * 0.95;
+      visual.packetB.material.emissiveIntensity = 0.84 + packetFlash * 0.95;
     }
   }
 
@@ -109,8 +116,10 @@ export class InfraSceneRenderer {
     this.nodeMeshes.clear();
 
     for (const visual of this.linkMeshes.values()) {
-      visual.beam.geometry.dispose();
-      visual.beam.material.dispose();
+      for (const segment of visual.segments) {
+        segment.geometry.dispose();
+        segment.material.dispose();
+      }
       visual.packetA.geometry.dispose();
       visual.packetA.material.dispose();
       visual.packetB.geometry.dispose();
@@ -173,8 +182,10 @@ export class InfraSceneRenderer {
       if (nextIds.has(linkId)) {
         continue;
       }
-      visual.beam.geometry.dispose();
-      visual.beam.material.dispose();
+      for (const segment of visual.segments) {
+        segment.geometry.dispose();
+        segment.material.dispose();
+      }
       visual.packetA.geometry.dispose();
       visual.packetA.material.dispose();
       visual.packetB.geometry.dispose();
@@ -197,20 +208,25 @@ export class InfraSceneRenderer {
           ...metadata
         };
 
-        const beam = new Mesh(
-          new CylinderGeometry(link.beamRadius, link.beamRadius, 1, 18, 1, true),
-          new MeshStandardMaterial({
-            color: link.beamColorHex,
-            emissive: link.beamColorHex,
-            emissiveIntensity: 0.4,
-            transparent: true,
-            opacity: 0.52,
-            metalness: 0.2,
-            roughness: 0.24,
-            side: DoubleSide
-          })
-        );
-        beam.name = `link-beam-${link.id}`;
+        const segments: Array<Mesh<CylinderGeometry, MeshStandardMaterial>> = [];
+        for (let i = 0; i < LINK_SEGMENT_COUNT; i++) {
+          const segment = new Mesh(
+            new CylinderGeometry(link.beamRadius, link.beamRadius, 1, 14, 1, true),
+            new MeshStandardMaterial({
+              color: link.beamColorHex,
+              emissive: link.beamColorHex,
+              emissiveIntensity: 0.36,
+              transparent: true,
+              opacity: 0.5,
+              metalness: 0.2,
+              roughness: 0.24,
+              side: DoubleSide
+            })
+          );
+          segment.name = `link-segment-${link.id}-${i}`;
+          segments.push(segment);
+          group.add(segment);
+        }
 
         const packetRadius = Math.max(0.015, link.beamRadius * 0.78);
         const packetA = new Mesh(
@@ -234,32 +250,35 @@ export class InfraSceneRenderer {
           })
         );
 
-        group.add(beam, packetA, packetB);
+        group.add(packetA, packetB);
         this.linkGroup.add(group);
 
         visual = {
           group,
-          beam,
+          segments,
           packetA,
           packetB,
           flowHz: link.flowHz,
           beamRadius: link.beamRadius,
-          from: new Vector3(),
-          to: new Vector3(),
+          path: [],
           phase: Math.random()
         };
         this.linkMeshes.set(link.id, visual);
       } else {
         visual.flowHz = link.flowHz;
         if (Math.abs(visual.beamRadius - link.beamRadius) > 0.0001) {
-          visual.beam.geometry.dispose();
-          visual.beam.geometry = new CylinderGeometry(link.beamRadius, link.beamRadius, 1, 18, 1, true);
+          for (const segment of visual.segments) {
+            segment.geometry.dispose();
+            segment.geometry = new CylinderGeometry(link.beamRadius, link.beamRadius, 1, 14, 1, true);
+          }
           visual.beamRadius = link.beamRadius;
         }
       }
 
-      visual.beam.material.color = new Color(link.beamColorHex);
-      visual.beam.material.emissive = new Color(link.beamColorHex);
+      for (const segment of visual.segments) {
+        segment.material.color = new Color(link.beamColorHex);
+        segment.material.emissive = new Color(link.beamColorHex);
+      }
       visual.packetA.material.color = new Color(link.beamColorHex);
       visual.packetA.material.emissive = new Color(link.beamColorHex);
       visual.packetB.material.color = new Color(link.beamColorHex);
@@ -287,10 +306,37 @@ export class InfraSceneRenderer {
         continue;
       }
 
-      visual.from.copy(from);
-      visual.to.copy(to);
-      this.updateBeamTransform(visual.beam, from, to);
+      const path = this.buildConstrainedPath(from, to, LINK_SEGMENT_COUNT + 1);
+      visual.path = path;
+
+      for (let i = 0; i < visual.segments.length; i++) {
+        const a = path[i];
+        const b = path[i + 1];
+        const segment = visual.segments[i];
+        if (!a || !b) {
+          segment.visible = false;
+          continue;
+        }
+        this.updateBeamTransform(segment, a, b);
+      }
     }
+  }
+
+  private buildConstrainedPath(from: Vector3, to: Vector3, samples: number): Vector3[] {
+    const path: Vector3[] = [];
+    const count = Math.max(samples, 2);
+
+    for (let i = 0; i < count; i++) {
+      const t = i / (count - 1);
+      const point = new Vector3(
+        from.x + (to.x - from.x) * t,
+        from.y + (to.y - from.y) * t,
+        from.z + (to.z - from.z) * t
+      );
+      path.push(this.clampToBoundary(point));
+    }
+
+    return path;
   }
 
   private updateBeamTransform(
@@ -423,11 +469,27 @@ function fract(value: number): number {
   return value - Math.floor(value);
 }
 
-function setPositionAt(target: Vector3, from: Vector3, to: Vector3, t: number): void {
+function setPositionOnPath(target: Vector3, path: Vector3[], t: number): void {
+  if (path.length === 0) {
+    target.set(0, 0, 0);
+    return;
+  }
+  if (path.length === 1) {
+    target.copy(path[0]);
+    return;
+  }
+
+  const scaled = t * (path.length - 1);
+  const index = Math.floor(scaled);
+  const nextIndex = Math.min(index + 1, path.length - 1);
+  const localT = scaled - index;
+  const a = path[index];
+  const b = path[nextIndex];
+
   target.set(
-    from.x + (to.x - from.x) * t,
-    from.y + (to.y - from.y) * t,
-    from.z + (to.z - from.z) * t
+    a.x + (b.x - a.x) * localT,
+    a.y + (b.y - a.y) * localT,
+    a.z + (b.z - a.z) * localT
   );
 }
 
