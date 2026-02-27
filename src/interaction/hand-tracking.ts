@@ -57,9 +57,9 @@ const TRACKED_JOINTS = [
 ];
 
 /** Distance in meters below which thumb+index tips are considered pinching. */
-const PINCH_THRESHOLD = 0.025;
+const PINCH_THRESHOLD = 0.032;
 /** Hysteresis: pinch releases when distance exceeds this. */
-const PINCH_RELEASE_THRESHOLD = 0.04;
+const PINCH_RELEASE_THRESHOLD = 0.055;
 
 interface PinchState {
   pinching: boolean;

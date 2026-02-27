@@ -10,3 +10,9 @@ export {
   type RenderNodeView
 } from "./rendering-selectors";
 export { selectTopologyStats, type TopologyStatsView } from "./tracking-selectors";
+export {
+  applyTopologyFilter,
+  type TopologyFilterMode,
+  type TopologyFilterResult
+} from "./filters";
+export { generateStressTopology, type StressTopologyOptions } from "./stress-topology";

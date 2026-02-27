@@ -23,7 +23,10 @@ export interface RenderLinkView {
   latencyMs: number;
   packetLossPct: number;
   beamColorHex: string;
+  /** Base radius determined by medium type (used for geometry creation). */
   beamRadius: number;
+  /** Traffic-scaled radius (base × utilization factor). */
+  trafficRadius: number;
   flowHz: number;
 }
 
@@ -46,19 +49,24 @@ export function selectRenderGraphView(snapshot: TopologySnapshot): RenderGraphVi
       rssi: node.metrics.rssi ?? null,
       snr: node.metrics.snr ?? null
     })),
-    links: snapshot.links.map((link) => ({
-      id: link.id,
-      fromNodeId: link.fromNodeId,
-      toNodeId: link.toNodeId,
-      medium: link.medium,
-      health: link.metrics.status,
-      utilizationPct: link.metrics.utilizationPct ?? 0,
-      latencyMs: link.metrics.latencyMs ?? 0,
-      packetLossPct: link.metrics.packetLossPct ?? 0,
-      beamColorHex: selectLinkColor(link.metrics.status),
-      beamRadius: selectBeamRadius(link.medium),
-      flowHz: selectFlowFrequency(link.metrics.utilizationPct ?? 0)
-    }))
+    links: snapshot.links.map((link) => {
+      const baseRadius = selectBeamRadius(link.medium);
+      const utilPct = link.metrics.utilizationPct ?? 0;
+      return {
+        id: link.id,
+        fromNodeId: link.fromNodeId,
+        toNodeId: link.toNodeId,
+        medium: link.medium,
+        health: link.metrics.status,
+        utilizationPct: utilPct,
+        latencyMs: link.metrics.latencyMs ?? 0,
+        packetLossPct: link.metrics.packetLossPct ?? 0,
+        beamColorHex: selectLinkColor(link.metrics.status),
+        beamRadius: baseRadius,
+        trafficRadius: selectTrafficRadius(baseRadius, utilPct),
+        flowHz: selectFlowFrequency(utilPct),
+      };
+    })
   };
 }
 
@@ -88,8 +96,15 @@ function selectBeamRadius(medium: string): number {
   return 0.018;
 }
 
+function selectTrafficRadius(baseRadius: number, utilizationPct: number): number {
+  const clamped = Math.max(0, Math.min(utilizationPct, 100));
+  // 0.5× at idle → 2× at full load
+  const factor = 0.5 + (clamped / 100) * 1.5;
+  return baseRadius * factor;
+}
+
 function selectFlowFrequency(utilizationPct: number): number {
   const clamped = Math.max(0, Math.min(utilizationPct, 100));
-  // Keep flow legible: roughly one packet hop every ~2-6 seconds.
-  return 0.16 + (clamped / 100) * 0.34;
+  // Idle: 0.08 Hz (~12s per cycle), full: 0.8 Hz (~1.25s per cycle)
+  return 0.08 + (clamped / 100) * 0.72;
 }

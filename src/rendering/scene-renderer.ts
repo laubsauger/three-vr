@@ -24,7 +24,11 @@ interface LinkVisualState {
   packetA: Mesh<SphereGeometry, MeshStandardMaterial>;
   packetB: Mesh<SphereGeometry, MeshStandardMaterial>;
   flowHz: number;
+  targetFlowHz: number;
   beamRadius: number;
+  targetBeamRadius: number;
+  /** Geometry creation radius (constant, used as scale reference). */
+  baseGeomRadius: number;
   path: Vector3[];
   phase: number;
 }
@@ -48,6 +52,7 @@ export class InfraSceneRenderer {
   private boundaryLoop: LineLoop<BufferGeometry, LineBasicMaterial> | null = null;
   private readonly tmpMid = new Vector3();
   private readonly tmpDir = new Vector3();
+  private lastTickSec = 0;
 
   constructor(scene: Scene) {
     this.root.name = "infra-root";
@@ -83,7 +88,22 @@ export class InfraSceneRenderer {
 
   tick(timeMs: number): void {
     const timeSec = timeMs / 1000;
+    const dt = this.lastTickSec > 0 ? Math.min(timeSec - this.lastTickSec, 0.1) : 0;
+    this.lastTickSec = timeSec;
+    // Framerate-independent exponential lerp (~3 units/sec convergence)
+    const lerpAlpha = dt > 0 ? 1 - Math.exp(-3 * dt) : 0;
+
     for (const visual of this.linkMeshes.values()) {
+      // Smooth interpolation of radius and packet speed
+      if (lerpAlpha > 0) {
+        visual.flowHz += (visual.targetFlowHz - visual.flowHz) * lerpAlpha;
+        visual.beamRadius += (visual.targetBeamRadius - visual.beamRadius) * lerpAlpha;
+      }
+
+      const radiusScale = visual.baseGeomRadius > 0
+        ? visual.beamRadius / visual.baseGeomRadius
+        : 1;
+
       const basePulse =
         0.42 + 0.58 * (0.5 + 0.5 * Math.sin((timeSec * visual.flowHz + visual.phase) * Math.PI * 2));
 
@@ -93,6 +113,9 @@ export class InfraSceneRenderer {
         const stagger = 0.82 + 0.18 * Math.sin((timeSec * visual.flowHz + visual.phase + offset) * Math.PI * 2);
         segment.material.opacity = 0.28 + basePulse * 0.28 * stagger;
         segment.material.emissiveIntensity = 0.16 + basePulse * 0.42 * stagger;
+        // Smooth thickness via scale (y stays as segment length from layout)
+        segment.scale.x = radiusScale;
+        segment.scale.z = radiusScale;
       }
 
       const packetLead = fract(timeSec * visual.flowHz + visual.phase);
@@ -104,6 +127,9 @@ export class InfraSceneRenderer {
         0.5 + 0.5 * Math.sin((timeSec * visual.flowHz + visual.phase + 0.15) * Math.PI * 4);
       visual.packetA.material.emissiveIntensity = 0.84 + packetFlash * 0.95;
       visual.packetB.material.emissiveIntensity = 0.84 + packetFlash * 0.95;
+      // Scale packets proportionally to beam thickness
+      visual.packetA.scale.setScalar(radiusScale);
+      visual.packetB.scale.setScalar(radiusScale);
     }
   }
 
@@ -272,26 +298,33 @@ export class InfraSceneRenderer {
         group.add(packetA, packetB);
         this.linkGroup.add(group);
 
+        const initialScale = link.beamRadius > 0
+          ? link.trafficRadius / link.beamRadius
+          : 1;
+        for (const segment of segments) {
+          segment.scale.x = initialScale;
+          segment.scale.z = initialScale;
+        }
+        packetA.scale.setScalar(initialScale);
+        packetB.scale.setScalar(initialScale);
+
         visual = {
           group,
           segments,
           packetA,
           packetB,
           flowHz: link.flowHz,
-          beamRadius: link.beamRadius,
+          targetFlowHz: link.flowHz,
+          beamRadius: link.trafficRadius,
+          targetBeamRadius: link.trafficRadius,
+          baseGeomRadius: link.beamRadius,
           path: [],
           phase: Math.random()
         };
         this.linkMeshes.set(link.id, visual);
       } else {
-        visual.flowHz = link.flowHz;
-        if (Math.abs(visual.beamRadius - link.beamRadius) > 0.0001) {
-          for (const segment of visual.segments) {
-            segment.geometry.dispose();
-            segment.geometry = new CylinderGeometry(link.beamRadius, link.beamRadius, 1, 14, 1, true);
-          }
-          visual.beamRadius = link.beamRadius;
-        }
+        visual.targetFlowHz = link.flowHz;
+        visual.targetBeamRadius = link.trafficRadius;
       }
 
       for (const segment of visual.segments) {
@@ -375,7 +408,8 @@ export class InfraSceneRenderer {
     beam.quaternion.setFromUnitVectors(InfraSceneRenderer.UP, this.tmpDir);
     this.tmpMid.copy(from).add(to).multiplyScalar(0.5);
     beam.position.copy(this.tmpMid);
-    beam.scale.set(1, length, 1);
+    // Only set y (segment length); x/z are managed by tick() for smooth radius
+    beam.scale.y = length;
   }
 
   private resolveNodePositions(nodes: RenderNodeView[]): Map<string, Vector3> {

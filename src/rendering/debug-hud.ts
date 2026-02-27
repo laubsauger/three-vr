@@ -8,6 +8,7 @@
 import {
   Camera,
   CanvasTexture,
+  Quaternion,
   Sprite,
   SpriteMaterial,
   Vector3,
@@ -46,6 +47,7 @@ export class DebugHud {
   /** Offset from camera in "follow" mode. */
   private readonly followOffset = new Vector3(-0.22, -0.10, -0.5);
   private readonly tmpPos = new Vector3();
+  private readonly tmpQuat = new Quaternion();
 
   /** Minimum interval between texture redraws (ms). */
   private readonly updateIntervalMs = 120;
@@ -86,12 +88,13 @@ export class DebugHud {
    * Call every frame. Updates HUD content and position.
    */
   update(data: DebugHudData, timeMs: number, camera?: Camera): void {
-    // Follow camera
+    // Follow camera (use world quaternion so XR headset pose is included)
     if (this._mode === "follow" && camera) {
       camera.getWorldPosition(this.tmpPos);
-      const forward = new Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
-      const right = new Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
-      const up = new Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
+      camera.getWorldQuaternion(this.tmpQuat);
+      const forward = new Vector3(0, 0, -1).applyQuaternion(this.tmpQuat);
+      const right = new Vector3(1, 0, 0).applyQuaternion(this.tmpQuat);
+      const up = new Vector3(0, 1, 0).applyQuaternion(this.tmpQuat);
 
       this.sprite.position.copy(this.tmpPos)
         .add(forward.multiplyScalar(-this.followOffset.z))
