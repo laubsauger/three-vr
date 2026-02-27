@@ -7,6 +7,10 @@ export interface RenderNodeView {
   type: string;
   health: HealthState;
   throughputMbps: number;
+  latencyMs: number;
+  packetLossPct: number;
+  rssi: number | null;
+  snr: number | null;
 }
 
 export interface RenderLinkView {
@@ -16,6 +20,8 @@ export interface RenderLinkView {
   medium: string;
   health: HealthState;
   utilizationPct: number;
+  latencyMs: number;
+  packetLossPct: number;
   beamColorHex: string;
   beamRadius: number;
   flowHz: number;
@@ -34,7 +40,11 @@ export function selectRenderGraphView(snapshot: TopologySnapshot): RenderGraphVi
       label: node.label,
       type: node.type,
       health: node.metrics.status,
-      throughputMbps: node.metrics.throughputMbps ?? 0
+      throughputMbps: node.metrics.throughputMbps ?? 0,
+      latencyMs: node.metrics.latencyMs ?? 0,
+      packetLossPct: node.metrics.packetLossPct ?? 0,
+      rssi: node.metrics.rssi ?? null,
+      snr: node.metrics.snr ?? null
     })),
     links: snapshot.links.map((link) => ({
       id: link.id,
@@ -43,6 +53,8 @@ export function selectRenderGraphView(snapshot: TopologySnapshot): RenderGraphVi
       medium: link.medium,
       health: link.metrics.status,
       utilizationPct: link.metrics.utilizationPct ?? 0,
+      latencyMs: link.metrics.latencyMs ?? 0,
+      packetLossPct: link.metrics.packetLossPct ?? 0,
       beamColorHex: selectLinkColor(link.metrics.status),
       beamRadius: selectBeamRadius(link.medium),
       flowHz: selectFlowFrequency(link.metrics.utilizationPct ?? 0)

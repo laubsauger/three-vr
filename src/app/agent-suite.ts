@@ -24,6 +24,7 @@ export function createDefaultAgentSuite(options: DefaultAgentSuiteOptions): Agen
     telemetry: createTelemetryAgent(),
     rendering: createRenderingAgent({
       scene: options.scene,
+      camera: options.camera,
       kmlText: options.kmlText,
     }),
     interaction: createInteractionAgent({

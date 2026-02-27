@@ -107,6 +107,25 @@ export class InfraSceneRenderer {
     }
   }
 
+  getNodePositions(): Map<string, Vector3> {
+    const result = new Map<string, Vector3>();
+    for (const [id, mesh] of this.nodeMeshes) {
+      result.set(id, mesh.position.clone());
+    }
+    return result;
+  }
+
+  getLinkMidpoints(): Map<string, Vector3> {
+    const result = new Map<string, Vector3>();
+    for (const [id, visual] of this.linkMeshes) {
+      if (visual.path.length > 0) {
+        const midIdx = Math.floor(visual.path.length / 2);
+        result.set(id, visual.path[midIdx].clone());
+      }
+    }
+    return result;
+  }
+
   dispose(): void {
     for (const mesh of this.nodeMeshes.values()) {
       mesh.geometry.dispose();

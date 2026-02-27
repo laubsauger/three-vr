@@ -1,15 +1,18 @@
-import { Quaternion, Scene, Vector3 } from "three";
+import { Camera, Quaternion, Scene, Vector3 } from "three";
 
 import type { IntegrationContext, RenderingAgent } from "../contracts/integration";
 import { selectRenderGraphView } from "../topology";
 import { InfraSceneRenderer } from "./scene-renderer";
 import { KmlMapRenderer, parseKml } from "../kml";
 import { MarkerIndicatorManager } from "./marker-indicator";
+import { HandVisualizer } from "./hand-visualizer";
+import { InfraLabelManager } from "./infra-labels";
 import { DebugHud } from "./debug-hud";
 import type { DebugHudData } from "./debug-hud";
 
 export interface RenderingAgentOptions {
   scene: Scene;
+  camera: Camera;
   /** Raw KML text to load as a map overlay. */
   kmlText?: string;
 }
@@ -18,13 +21,17 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
   const renderer = new InfraSceneRenderer(options.scene);
   const kmlMap = new KmlMapRenderer();
   const markerIndicators = new MarkerIndicatorManager();
+  const handVisualizer = new HandVisualizer();
+  const labelManager = new InfraLabelManager();
   const debugHud = new DebugHud();
 
   options.scene.add(kmlMap.getRoot());
   options.scene.add(markerIndicators.getRoot());
+  options.scene.add(handVisualizer.getRoot());
+  options.scene.add(labelManager.getRoot());
   options.scene.add(debugHud.sprite);
 
-  // Position debug HUD in a default spot (updated per-frame in XR via camera)
+  // Position debug HUD in a default spot (updated per-frame via camera follow)
   debugHud.sprite.position.set(-0.3, 1.6, -0.8);
 
   let unsubscribeTopology: (() => void) | null = null;
@@ -33,6 +40,8 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
   let unsubscribeXrFrame: (() => void) | null = null;
   let unsubscribePerformance: (() => void) | null = null;
   let unsubscribeTrackingStatus: (() => void) | null = null;
+  let unsubscribeHands: (() => void) | null = null;
+  let unsubscribePinch: (() => void) | null = null;
   let animationHandle = 0;
   let xrRunning = false;
 
@@ -56,6 +65,12 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
     trackingBackend: "unknown",
     detectorStatus: "idle",
     xrState: "idle",
+    handsDetected: 0,
+    leftPinch: false,
+    rightPinch: false,
+    leftPinchStrength: 0,
+    rightPinchStrength: 0,
+    hudMode: "follow",
   };
 
   const animate = (timeMs: number): void => {
@@ -71,6 +86,11 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
         unsubscribeTopology = context.events.on("topology/snapshot", (payload) => {
           const graph = selectRenderGraphView(payload.snapshot);
           renderer.updateGraph(graph);
+
+          // Update labels with resolved positions
+          const nodePositions = renderer.getNodePositions();
+          const linkMidpoints = renderer.getLinkMidpoints();
+          labelManager.updateGraph(graph, nodePositions, linkMidpoints);
         });
 
         unsubscribeMarkers = context.events.on("tracking/markers", (payload) => {
@@ -126,7 +146,8 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
           if (xrRunning) {
             renderer.tick(payload.time);
           }
-          debugHud.update(hudData, payload.time);
+          hudData.hudMode = debugHud.mode;
+          debugHud.update(hudData, payload.time, options.camera);
         });
 
         unsubscribePerformance = context.events.on("app/performance", (payload) => {
@@ -138,6 +159,31 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
         unsubscribeTrackingStatus = context.events.on("tracking/status", (payload) => {
           hudData.trackingBackend = payload.backend;
           hudData.detectorStatus = payload.detectorStatus;
+        });
+
+        unsubscribeHands = context.events.on("interaction/hands", (payload) => {
+          handVisualizer.update(payload.hands);
+          hudData.handsDetected = payload.hands.length;
+          hudData.leftPinch = false;
+          hudData.rightPinch = false;
+          hudData.leftPinchStrength = 0;
+          hudData.rightPinchStrength = 0;
+          for (const h of payload.hands) {
+            if (h.hand === "left") {
+              hudData.leftPinch = h.pinching;
+              hudData.leftPinchStrength = h.pinchStrength;
+            } else {
+              hudData.rightPinch = h.pinching;
+              hudData.rightPinchStrength = h.pinchStrength;
+            }
+          }
+        });
+
+        // Pinch toggles HUD mode
+        unsubscribePinch = context.events.on("interaction/pinch", (payload) => {
+          if (payload.state === "start" && payload.hand === "left") {
+            debugHud.toggleMode();
+          }
         });
 
         if (context.xrRuntime.getState() === "running") {
@@ -186,12 +232,22 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
         unsubscribeTrackingStatus();
         unsubscribeTrackingStatus = null;
       }
+      if (unsubscribeHands) {
+        unsubscribeHands();
+        unsubscribeHands = null;
+      }
+      if (unsubscribePinch) {
+        unsubscribePinch();
+        unsubscribePinch = null;
+      }
       if (animationHandle) {
         window.cancelAnimationFrame(animationHandle);
         animationHandle = 0;
       }
       kmlMap.dispose();
       markerIndicators.dispose();
+      handVisualizer.dispose();
+      labelManager.dispose();
       debugHud.dispose();
       renderer.dispose();
     }

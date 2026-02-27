@@ -26,37 +26,10 @@ function toLabel(state: XrRuntimeState): string {
   return `XR state: ${state}`;
 }
 
-type CameraProbeState = "not-requested" | "granted" | "denied" | "unsupported";
-
 interface MarkerCalibrationState {
   firstSeenMs: number;
   lastSeenMs: number;
   confidence: number;
-}
-
-async function requestEnvironmentCameraProbe(): Promise<CameraProbeState> {
-  if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== "function") {
-    return "unsupported";
-  }
-
-  let stream: MediaStream | null = null;
-  try {
-    stream = await navigator.mediaDevices.getUserMedia({
-      video: {
-        facingMode: { ideal: "environment" }
-      },
-      audio: false
-    });
-    return "granted";
-  } catch {
-    return "denied";
-  } finally {
-    if (stream) {
-      for (const track of stream.getTracks()) {
-        track.stop();
-      }
-    }
-  }
 }
 
 export async function bootstrapApp(): Promise<void> {
@@ -250,7 +223,6 @@ export async function bootstrapApp(): Promise<void> {
   const xrPerformance = new PerformanceMonitor();
   const desktopPerformance = new PerformanceMonitor();
   let lastPerfEmitMs = 0;
-  let cameraProbeState: CameraProbeState = "not-requested";
   const markerCalibration = new Map<number, MarkerCalibrationState>();
 
   const emitError = (
@@ -479,23 +451,22 @@ export async function bootstrapApp(): Promise<void> {
 
   startButton.addEventListener("click", async () => {
     try {
-      if (cameraProbeState !== "granted") {
-        cameraProbeState = await requestEnvironmentCameraProbe();
-      }
-
-      if (cameraProbeState === "granted") {
-        cameraStatsLabel.textContent = "Camera: granted";
-      } else if (cameraProbeState === "denied") {
-        cameraStatsLabel.textContent = "Camera: denied";
-        emitError(
-          "CAMERA_PERMISSION_FAILED",
-          "Camera permission denied. Marker tracking will not work with real camera detectors.",
-          true
-        );
-      } else if (cameraProbeState === "unsupported") {
-        cameraStatsLabel.textContent = "Camera: unsupported in this browser";
-      } else {
-        cameraStatsLabel.textContent = "Camera: not requested";
+      // Pre-start camera detector BEFORE entering XR so the stream
+      // is acquired while we still have camera access. Once the XR
+      // session starts, the browser may lock the camera exclusively.
+      if (switchableDetector.getMode() === "camera") {
+        cameraStatsLabel.textContent = "Camera: starting...";
+        try {
+          await switchableDetector.camera.ensureStarted();
+          cameraStatsLabel.textContent = "Camera: ready";
+        } catch {
+          cameraStatsLabel.textContent = "Camera: failed to start";
+          emitError(
+            "CAMERA_PERMISSION_FAILED",
+            "Failed to start camera before XR session. Marker tracking may not work.",
+            true
+          );
+        }
       }
 
       await xrRuntime.start({

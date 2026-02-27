@@ -14,6 +14,7 @@ import {
 } from "three";
 
 import type { IntegrationContext, InteractionAgent } from "../contracts/integration";
+import { HandTracker } from "./hand-tracking";
 
 type SelectableKind = "node" | "link";
 
@@ -81,8 +82,13 @@ export function createInteractionAgent(options: InteractionAgentOptions): Intera
   let onXrSelectStart: EventListener | null = null;
   let onXrSqueezeStart: EventListener | null = null;
   let unsubscribeXrState: (() => void) | null = null;
+  let unsubscribeXrFrame: (() => void) | null = null;
+  let unsubscribePinch: (() => void) | null = null;
   let activeSession: SessionLike | null = null;
   const defaultColors = new WeakMap<Material, number>();
+  const handTracker = new HandTracker();
+  const tmpWorldPos = new Vector3();
+  const PINCH_PICK_RADIUS = 0.15;
 
   const setHighlighted = (object: Object3D, highlighted: boolean): void => {
     if (object instanceof Mesh) {
@@ -143,6 +149,26 @@ export function createInteractionAgent(options: InteractionAgentOptions): Intera
     raycaster.set(origin, direction.normalize());
     const intersections = raycaster.intersectObjects(options.scene.children, true);
     return pickFirstSelectable(intersections.map((entry) => entry.object));
+  };
+
+  const pickFromProximity = (point: Vector3): SelectableTarget | null => {
+    let bestTarget: SelectableTarget | null = null;
+    let bestDistSq = PINCH_PICK_RADIUS * PINCH_PICK_RADIUS;
+
+    options.scene.traverse((object) => {
+      const selectableType = readSelectableType(object);
+      const selectableId = readSelectableId(object);
+      if (!selectableType || !selectableId) return;
+
+      object.getWorldPosition(tmpWorldPos);
+      const distSq = tmpWorldPos.distanceToSquared(point);
+      if (distSq < bestDistSq) {
+        bestDistSq = distSq;
+        bestTarget = { kind: selectableType, id: selectableId, object };
+      }
+    });
+
+    return bestTarget;
   };
 
   const pickFromInputSourceEvent = (
@@ -246,6 +272,36 @@ export function createInteractionAgent(options: InteractionAgentOptions): Intera
         }
       });
 
+      // Per-frame hand tracking
+      unsubscribeXrFrame = context.events.on("xr/frame", (tick) => {
+        if (!tick.frame || !tick.referenceSpace) return;
+
+        const hands = handTracker.readHands(tick.frame, tick.referenceSpace);
+        if (!hands) return;
+
+        context.events.emit("interaction/hands", {
+          hands,
+          timestampMs: tick.time,
+        });
+
+        for (const transition of handTracker.getPinchTransitions(hands)) {
+          context.events.emit("interaction/pinch", {
+            hand: transition.hand,
+            state: transition.state,
+            position: transition.position,
+            timestampMs: tick.time,
+          });
+        }
+      });
+
+      // Right-hand pinch selects nearest object
+      unsubscribePinch = context.events.on("interaction/pinch", (payload) => {
+        if (payload.hand !== "right" || payload.state !== "start") return;
+        const pinchPos = new Vector3(payload.position.x, payload.position.y, payload.position.z);
+        const target = pickFromProximity(pinchPos);
+        updateSelection(context, target);
+      });
+
       if (context.xrRuntime.getState() === "running") {
         attachSessionListeners(context, context.xrRuntime.getSession());
       }
@@ -256,6 +312,15 @@ export function createInteractionAgent(options: InteractionAgentOptions): Intera
         unsubscribeXrState();
         unsubscribeXrState = null;
       }
+      if (unsubscribeXrFrame) {
+        unsubscribeXrFrame();
+        unsubscribeXrFrame = null;
+      }
+      if (unsubscribePinch) {
+        unsubscribePinch();
+        unsubscribePinch = null;
+      }
+      handTracker.reset();
       detachSessionListeners();
 
       if (onPointerDown) {

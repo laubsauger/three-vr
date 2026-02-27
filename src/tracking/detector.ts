@@ -52,8 +52,8 @@ export class CameraWorkerMarkerDetector implements MarkerDetector {
   private startFailed = false;
 
   constructor(options: CameraWorkerDetectorOptions = {}) {
-    this.captureWidth = options.captureWidth ?? 320;
-    this.captureHeight = options.captureHeight ?? 240;
+    this.captureWidth = options.captureWidth ?? 640;
+    this.captureHeight = options.captureHeight ?? 480;
     this.minCaptureDeltaMs = 1000 / (options.maxCaptureHz ?? 8);
     this.staleThresholdMs = options.staleThresholdMs ?? 550;
   }
@@ -90,6 +90,20 @@ export class CameraWorkerMarkerDetector implements MarkerDetector {
       width: this.captureWidth,
       height: this.captureHeight,
     };
+  }
+
+  /**
+   * Pre-initialize the camera stream and worker. Call this BEFORE
+   * entering an XR session so the camera is already acquired and
+   * won't be blocked by the XR runtime's exclusive camera access.
+   */
+  async ensureStarted(): Promise<void> {
+    if (this.worker || this.isStarting) return;
+    if (this.startFailed) {
+      // Reset so we can retry
+      this.startFailed = false;
+    }
+    await this.start();
   }
 
   getStatus(): CameraWorkerDetectorStatus {
@@ -195,6 +209,16 @@ export class CameraWorkerMarkerDetector implements MarkerDetector {
       });
 
       worker.addEventListener("error", () => {
+        this.startFailed = true;
+        this.latestDetections = [];
+        this.latestBestId = null;
+        this.workerBusy = false;
+      });
+
+      worker.addEventListener("messageerror", () => {
+        this.startFailed = true;
+        this.latestDetections = [];
+        this.latestBestId = null;
         this.workerBusy = false;
       });
 

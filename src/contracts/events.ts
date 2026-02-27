@@ -1,8 +1,11 @@
 import type {
+  HandData,
+  Handedness,
   LinkMetricUpdate,
   NodeMetricUpdate,
   TopologySnapshot,
-  TrackedMarker
+  TrackedMarker,
+  Vector3Like
 } from "./domain";
 import type { XrCapabilities, XrFrameTick, XrRuntimeState } from "./xr";
 
@@ -92,6 +95,16 @@ export interface AppEventMap {
     timestampMs: number;
   };
   "interaction/selection-change": SelectionChangeEvent;
+  "interaction/hands": {
+    hands: HandData[];
+    timestampMs: number;
+  };
+  "interaction/pinch": {
+    hand: Handedness;
+    state: "start" | "end";
+    position: Vector3Like;
+    timestampMs: number;
+  };
   "app/performance": PerformanceSampleEvent;
   "app/error": AppErrorEnvelope;
 }

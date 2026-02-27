@@ -72,3 +72,20 @@ export interface TrackedMarker {
   pose: AnchorPose;
   sizeMeters?: number;
 }
+
+export type Handedness = "left" | "right";
+
+export interface HandJoint {
+  name: string;
+  position: Vector3Like;
+  radius: number;
+}
+
+export interface HandData {
+  hand: Handedness;
+  joints: HandJoint[];
+  pinching: boolean;
+  pinchStrength: number;
+  /** Midpoint between thumb tip and index tip. */
+  pinchPoint: Vector3Like;
+}
