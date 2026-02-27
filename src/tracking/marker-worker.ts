@@ -10,6 +10,8 @@
 
 import cvSource from "js-aruco2/src/cv.js?raw";
 import arucoSource from "js-aruco2/src/aruco.js?raw";
+import svdSource from "js-aruco2/src/svd.js?raw";
+import positSource from "js-aruco2/src/posit2.js?raw";
 import dictSource from "js-aruco2/src/dictionaries/aruco_6x6_1000.js?raw";
 
 // ---- Types ----
@@ -30,6 +32,11 @@ interface WorkerDetection {
   confidence: number;
   score: number;
   corners: Array<{ x: number; y: number }>;
+  pose?: {
+    rotation: number[][];
+    translationMm: [number, number, number];
+    error: number;
+  };
 }
 
 interface DetectResponseMessage {
@@ -58,17 +65,30 @@ const ctx: Record<string, any> = {};
 // Evaluate CJS modules with ctx as `this` (non-strict mode via Function)
 new Function(cvSource).call(ctx);
 new Function(arucoSource).call(ctx);
+new Function(svdSource).call(ctx);
+new Function(positSource).call(ctx);
 new Function(dictSource).call(ctx);
 
 const AR = ctx.AR;
+const POS = ctx.POS;
 if (!AR?.Detector) {
   throw new Error("Failed to initialize ArUco detector in worker");
+}
+if (!POS?.Posit) {
+  throw new Error("Failed to initialize POSIT solver in worker");
 }
 
 const detector: ArucoDetectorInstance = new AR.Detector({
   dictionaryName: "ARUCO_6X6_1000",
   maxHammingDistance: 1,
 });
+
+// ---- Pose config ----
+
+const MARKER_MODEL_SIZE_MM = 120;
+const ASSUMED_CAMERA_FOV_Y_RAD = (70 * Math.PI) / 180;
+let positSolver: { pose: (points: Array<{ x: number; y: number }>) => unknown } | null = null;
+let positFocalLengthPx = 0;
 
 // ---- Filtering config ----
 
@@ -161,6 +181,7 @@ function runDetection(
       Math.pow(cx / width - 0.5, 2) + Math.pow(cy / height - 0.5, 2)
     );
     const score = confidence * 50 + sizeNorm * 30 + centeredness * 20;
+    const pose = estimatePose(marker.corners, width, height);
 
     candidates.push({
       markerId: marker.id,
@@ -170,6 +191,7 @@ function runDetection(
       confidence,
       score,
       corners: marker.corners,
+      pose,
     });
   }
 
@@ -213,4 +235,55 @@ function runDetection(
 
 function dist(a: { x: number; y: number }, b: { x: number; y: number }): number {
   return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2);
+}
+
+function estimatePose(
+  corners: Array<{ x: number; y: number }>,
+  width: number,
+  height: number
+): WorkerDetection["pose"] | undefined {
+  const focalLengthPx = height / (2 * Math.tan(ASSUMED_CAMERA_FOV_Y_RAD * 0.5));
+  if (!positSolver || Math.abs(positFocalLengthPx - focalLengthPx) > 0.001) {
+    positSolver = new POS.Posit(MARKER_MODEL_SIZE_MM, focalLengthPx);
+    positFocalLengthPx = focalLengthPx;
+  }
+
+  const centeredCorners = corners.map((corner) => ({
+    x: corner.x - width * 0.5,
+    y: height * 0.5 - corner.y
+  }));
+
+  try {
+    const pose = positSolver!.pose(centeredCorners) as {
+      bestError?: number;
+      bestRotation?: number[][];
+      bestTranslation?: number[];
+    };
+    if (
+      !pose ||
+      typeof pose.bestError !== "number" ||
+      !Array.isArray(pose.bestRotation) ||
+      !Array.isArray(pose.bestTranslation) ||
+      pose.bestRotation.length !== 3 ||
+      pose.bestTranslation.length !== 3
+    ) {
+      return undefined;
+    }
+
+    const translationMm = pose.bestTranslation as [number, number, number];
+    if (!Number.isFinite(translationMm[0]) || !Number.isFinite(translationMm[1]) || !Number.isFinite(translationMm[2])) {
+      return undefined;
+    }
+    if (translationMm[2] <= 1) {
+      return undefined;
+    }
+
+    return {
+      rotation: pose.bestRotation,
+      translationMm,
+      error: pose.bestError
+    };
+  } catch {
+    return undefined;
+  }
 }
