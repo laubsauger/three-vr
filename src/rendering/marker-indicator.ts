@@ -1,23 +1,26 @@
 /**
  * 3D visual indicators placed on detected ArUco markers.
  * Each marker gets:
- *   - A wireframe square matching the marker's physical size
- *   - RGB axis arrows showing the marker's 6DOF pose (X=red, Y=green, Z=blue)
+ *   - A base outline matching the marker's physical size
+ *   - A shallow translucent prism extruded off the marker plane
+ *   - Highlighted leading face + edge lines so the volume reads clearly in XR
+ *   - RGB axis arrows showing the solved 6DOF pose (X=red, Y=green, Z=blue)
  *   - A floating ID label sprite
- *   - A small animated gem (spinning icosahedron)
  */
 
 import {
+  BoxGeometry,
   BufferGeometry,
   CanvasTexture,
   ConeGeometry,
   DoubleSide,
+  EdgesGeometry,
   Float32BufferAttribute,
   Group,
-  IcosahedronGeometry,
   Line,
   LineBasicMaterial,
   LineLoop,
+  LineSegments,
   Mesh,
   MeshBasicMaterial,
   MeshStandardMaterial,
@@ -30,12 +33,17 @@ import {
 
 import type { TrackedMarker } from "../contracts";
 
+const DEFAULT_MARKER_SIZE_METERS = 0.12;
+const BOX_DEPTH_RATIO = 0.28;
+const MIN_BOX_DEPTH_METERS = 0.02;
+
 interface MarkerVisual {
   group: Group;
-  frame: LineLoop;
-  fill: Mesh<PlaneGeometry, MeshBasicMaterial>;
+  baseFrame: LineLoop;
+  volume: Mesh<BoxGeometry, MeshStandardMaterial>;
+  volumeEdges: LineSegments<EdgesGeometry, LineBasicMaterial>;
+  leadFace: Mesh<PlaneGeometry, MeshBasicMaterial>;
   axesGroup: Group;
-  gem: Mesh;
   label: Sprite;
   labelTexture: CanvasTexture;
   lastSeenMs: number;
@@ -46,8 +54,6 @@ export class MarkerIndicatorManager {
   private readonly visuals = new Map<number, MarkerVisual>();
   private readonly tmpPos = new Vector3();
   private readonly tmpQuat = new Quaternion();
-
-  /** How long to keep a marker visual after it stops being detected. */
   private readonly fadeOutMs = 800;
 
   constructor() {
@@ -71,7 +77,6 @@ export class MarkerIndicatorManager {
         this.root.add(visual.group);
       }
 
-      // Position at marker pose
       this.tmpPos.set(
         marker.pose.position.x,
         marker.pose.position.y,
@@ -89,26 +94,29 @@ export class MarkerIndicatorManager {
       visual.group.visible = true;
       visual.lastSeenMs = timeMs;
 
-      // Scale frame, fill, and axes to match marker physical size
-      const size = marker.sizeMeters ?? 0.08;
-      visual.frame.scale.set(size, size, 1);
-      visual.fill.scale.set(size, size, 1);
-      visual.axesGroup.scale.setScalar(size * 1.4);
+      const size = marker.sizeMeters ?? DEFAULT_MARKER_SIZE_METERS;
+      const depth = Math.max(MIN_BOX_DEPTH_METERS, size * BOX_DEPTH_RATIO);
+      const confidence = marker.pose.confidence;
 
-      // Animate the gem
-      visual.gem.rotation.y = timeMs * 0.002;
-      visual.gem.rotation.x = timeMs * 0.001;
-      visual.gem.position.set(0, 0, -(0.06 + Math.sin(timeMs * 0.003) * 0.01));
+      visual.baseFrame.scale.set(size, size, 1);
+      visual.volume.scale.set(size, size, depth);
+      visual.volume.position.z = -depth * 0.5;
+      visual.volumeEdges.scale.copy(visual.volume.scale);
+      visual.volumeEdges.position.copy(visual.volume.position);
 
-      // Confidence-based glow
-      const conf = marker.pose.confidence;
-      const intensity = 0.4 + conf * 0.8;
-      (visual.gem.material as MeshStandardMaterial).emissiveIntensity = intensity;
-      (visual.frame.material as LineBasicMaterial).opacity = 0.4 + conf * 0.6;
-      visual.fill.material.opacity = 0.06 + conf * 0.1;
+      visual.leadFace.scale.set(size * 0.9, size * 0.9, 1);
+      visual.leadFace.position.z = -depth - 0.0005;
+
+      visual.axesGroup.scale.setScalar(size * 1.1);
+      visual.label.position.set(0, size * 0.62, -depth * 0.7);
+
+      visual.volume.material.opacity = 0.16 + confidence * 0.12;
+      visual.volume.material.emissiveIntensity = 0.2 + confidence * 0.35;
+      visual.leadFace.material.opacity = 0.12 + confidence * 0.1;
+      (visual.baseFrame.material as LineBasicMaterial).opacity = 0.55 + confidence * 0.35;
+      (visual.volumeEdges.material as LineBasicMaterial).opacity = 0.6 + confidence * 0.3;
     }
 
-    // Fade out or remove unseen markers
     for (const [id, visual] of this.visuals) {
       if (seen.has(id)) continue;
 
@@ -116,15 +124,16 @@ export class MarkerIndicatorManager {
       if (age > this.fadeOutMs) {
         this.disposeVisual(visual);
         this.visuals.delete(id);
-      } else {
-        // Fade
-        const alpha = 1 - age / this.fadeOutMs;
-        visual.group.visible = alpha > 0.05;
-        (visual.frame.material as LineBasicMaterial).opacity = alpha * 0.6;
-        visual.fill.material.opacity = alpha * 0.12;
-        (visual.gem.material as MeshStandardMaterial).opacity = alpha;
-        visual.label.material.opacity = alpha;
+        continue;
       }
+
+      const alpha = 1 - age / this.fadeOutMs;
+      visual.group.visible = alpha > 0.05;
+      (visual.baseFrame.material as LineBasicMaterial).opacity = alpha * 0.8;
+      (visual.volumeEdges.material as LineBasicMaterial).opacity = alpha * 0.75;
+      visual.volume.material.opacity = alpha * 0.2;
+      visual.leadFace.material.opacity = alpha * 0.18;
+      visual.label.material.opacity = alpha;
     }
   }
 
@@ -139,8 +148,6 @@ export class MarkerIndicatorManager {
     const group = new Group();
     group.name = `marker-indicator-${markerId}`;
 
-    // Wireframe square in XY plane (normal = +Z, toward camera).
-    // Unit size (1×1); scaled per-frame to match sizeMeters.
     const halfSize = 0.5;
     const frameGeom = new BufferGeometry();
     frameGeom.setAttribute("position", new Float32BufferAttribute([
@@ -152,53 +159,64 @@ export class MarkerIndicatorManager {
     const frameMat = new LineBasicMaterial({
       color: "#00ff88",
       transparent: true,
-      opacity: 0.8,
-      linewidth: 2,
+      opacity: 0.85,
     });
-    const frame = new LineLoop(frameGeom, frameMat);
-    frame.name = "marker-frame";
-    group.add(frame);
+    const baseFrame = new LineLoop(frameGeom, frameMat);
+    baseFrame.name = "marker-base-frame";
+    group.add(baseFrame);
 
-    // Semi-transparent fill behind the wireframe
-    const fillGeom = new PlaneGeometry(1, 1);
-    const fillMat = new MeshBasicMaterial({
-      color: "#00ff88",
+    const volumeGeom = new BoxGeometry(1, 1, 1);
+    const volumeMat = new MeshStandardMaterial({
+      color: "#21f0a0",
+      emissive: "#0b6b42",
+      emissiveIntensity: 0.35,
+      roughness: 0.32,
+      metalness: 0.08,
       transparent: true,
-      opacity: 0.12,
-      side: DoubleSide,
+      opacity: 0.22,
       depthWrite: false,
     });
-    const fill = new Mesh(fillGeom, fillMat);
-    fill.name = "marker-fill";
-    group.add(fill);
+    const volume = new Mesh(volumeGeom, volumeMat);
+    volume.name = "marker-volume";
+    volume.position.z = -0.5;
+    group.add(volume);
 
-    // 3D axis arrows (RGB = XYZ). Unit length; scaled per-frame.
+    const volumeEdges = new LineSegments(
+      new EdgesGeometry(volumeGeom),
+      new LineBasicMaterial({
+        color: "#8cffd3",
+        transparent: true,
+        opacity: 0.9,
+      }),
+    );
+    volumeEdges.name = "marker-volume-edges";
+    volumeEdges.position.copy(volume.position);
+    group.add(volumeEdges);
+
+    const leadFace = new Mesh(
+      new PlaneGeometry(1, 1),
+      new MeshBasicMaterial({
+        color: "#c8ffeb",
+        transparent: true,
+        opacity: 0.18,
+        side: DoubleSide,
+        depthWrite: false,
+      }),
+    );
+    leadFace.name = "marker-lead-face";
+    leadFace.position.z = -1.0005;
+    group.add(leadFace);
+
     const axesGroup = this.createAxesGroup();
     group.add(axesGroup);
 
-    // Small gem floating in front of the marker
-    const gem = new Mesh(
-      new IcosahedronGeometry(0.015, 1),
-      new MeshStandardMaterial({
-        color: "#00ff88",
-        emissive: "#00ff88",
-        emissiveIntensity: 0.8,
-        metalness: 0.3,
-        roughness: 0.2,
-        transparent: true,
-        opacity: 1,
-        side: DoubleSide,
-      }),
-    );
-    gem.name = "marker-gem";
-    gem.position.z = -0.06;
-    group.add(gem);
-
-    // ID label sprite
     const canvas = document.createElement("canvas");
     canvas.width = 128;
     canvas.height = 48;
-    const ctx = canvas.getContext("2d")!;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      throw new Error("Failed to create marker label canvas");
+    }
 
     ctx.fillStyle = "rgba(0, 0, 0, 0.75)";
     ctx.beginPath();
@@ -217,15 +235,24 @@ export class MarkerIndicatorManager {
       depthTest: false,
     });
     const label = new Sprite(labelMat);
-    label.position.set(0, 0.08, -0.02);
+    label.position.set(0, 0.08, -0.04);
     label.scale.set(0.06, 0.022, 1);
     label.name = "marker-label";
     group.add(label);
 
-    return { group, frame, fill, axesGroup, gem, label, labelTexture, lastSeenMs: 0 };
+    return {
+      group,
+      baseFrame,
+      volume,
+      volumeEdges,
+      leadFace,
+      axesGroup,
+      label,
+      labelTexture,
+      lastSeenMs: 0,
+    };
   }
 
-  /** Create RGB axis arrows: X=red, Y=green, Z=blue (pointing toward camera). */
   private createAxesGroup(): Group {
     const axes = new Group();
     axes.name = "marker-axes";
@@ -234,7 +261,6 @@ export class MarkerIndicatorManager {
     const tipHeight = 0.15;
     const tipRadius = 0.04;
 
-    // X axis — red
     axes.add(this.createAxisArrow([shaftLength, 0, 0], 0xff3333));
     const tipX = new Mesh(
       new ConeGeometry(tipRadius, tipHeight, 6),
@@ -244,7 +270,6 @@ export class MarkerIndicatorManager {
     tipX.rotation.z = -Math.PI / 2;
     axes.add(tipX);
 
-    // Y axis — green
     axes.add(this.createAxisArrow([0, shaftLength, 0], 0x33ff33));
     const tipY = new Mesh(
       new ConeGeometry(tipRadius, tipHeight, 6),
@@ -253,7 +278,6 @@ export class MarkerIndicatorManager {
     tipY.position.set(0, shaftLength + tipHeight / 2, 0);
     axes.add(tipY);
 
-    // Z axis — blue (points toward camera = marker normal)
     axes.add(this.createAxisArrow([0, 0, shaftLength], 0x3388ff));
     const tipZ = new Mesh(
       new ConeGeometry(tipRadius, tipHeight, 6),
@@ -269,26 +293,34 @@ export class MarkerIndicatorManager {
   private createAxisArrow(to: [number, number, number], color: number): Line {
     const geom = new BufferGeometry();
     geom.setAttribute("position", new Float32BufferAttribute([0, 0, 0, ...to], 3));
-    return new Line(geom, new LineBasicMaterial({ color, linewidth: 2 }));
+    return new Line(geom, new LineBasicMaterial({ color }));
   }
 
   private disposeVisual(visual: MarkerVisual): void {
-    visual.frame.geometry.dispose();
-    (visual.frame.material as LineBasicMaterial).dispose();
-    visual.fill.geometry.dispose();
-    visual.fill.material.dispose();
+    visual.baseFrame.geometry.dispose();
+    (visual.baseFrame.material as LineBasicMaterial).dispose();
+
+    visual.volume.geometry.dispose();
+    visual.volume.material.dispose();
+
+    visual.volumeEdges.geometry.dispose();
+    (visual.volumeEdges.material as LineBasicMaterial).dispose();
+
+    visual.leadFace.geometry.dispose();
+    visual.leadFace.material.dispose();
 
     visual.axesGroup.traverse((child) => {
       if (child instanceof Line || child instanceof Mesh) {
         child.geometry.dispose();
-        if (child.material instanceof MeshStandardMaterial || child.material instanceof LineBasicMaterial) {
+        if (
+          child.material instanceof MeshStandardMaterial ||
+          child.material instanceof LineBasicMaterial
+        ) {
           child.material.dispose();
         }
       }
     });
 
-    visual.gem.geometry.dispose();
-    (visual.gem.material as MeshStandardMaterial).dispose();
     visual.labelTexture.dispose();
     visual.label.material.dispose();
     this.root.remove(visual.group);

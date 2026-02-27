@@ -85,21 +85,21 @@ function selectLinkColor(status: HealthState): string {
 
 function selectBeamRadius(medium: string): number {
   if (medium === "fiber") {
-    return 0.032;
+    return 0.012;
   }
   if (medium === "wired") {
-    return 0.026;
+    return 0.009;
   }
   if (medium === "wireless") {
-    return 0.02;
+    return 0.007;
   }
-  return 0.018;
+  return 0.006;
 }
 
 function selectTrafficRadius(baseRadius: number, utilizationPct: number): number {
   const clamped = Math.max(0, Math.min(utilizationPct, 100));
-  // 0.5× at idle → 2× at full load
-  const factor = 0.5 + (clamped / 100) * 1.5;
+  // 0.7× at idle → 1.6× at full load
+  const factor = 0.7 + (clamped / 100) * 0.9;
   return baseRadius * factor;
 }
 

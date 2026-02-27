@@ -15,14 +15,14 @@ import type { RenderGraphView, RenderLinkView, RenderNodeView } from "../topolog
 import type { TrackedMarker, XrBoundaryPoint } from "../contracts";
 
 const LINK_SEGMENT_COUNT = 4;
-const NODE_RADIUS = 0.08;
+const NODE_RADIUS = 0.05;
 const NODE_SPHERE_WIDTH_SEGMENTS = 12;
 const NODE_SPHERE_HEIGHT_SEGMENTS = 8;
 const LINK_BEAM_RADIAL_SEGMENTS = 8;
 const PACKET_SPHERE_WIDTH_SEGMENTS = 8;
 const PACKET_SPHERE_HEIGHT_SEGMENTS = 6;
 const MIN_LINK_BEAM_RADIUS = 0.003;
-const MIN_PACKET_RADIUS = 0.015;
+const MIN_PACKET_RADIUS = 0.008;
 const MARKER_LAYOUT_POSITION_EPSILON_SQ = 0.0004;
 const MARKER_LAYOUT_MIN_INTERVAL_MS = 80;
 
@@ -163,24 +163,18 @@ export class InfraSceneRenderer {
       }
 
       const beamRadius = Math.max(visual.beamRadius, MIN_LINK_BEAM_RADIUS);
-      const packetRadius = Math.max(MIN_PACKET_RADIUS, beamRadius * 0.78);
+      const packetRadius = Math.max(MIN_PACKET_RADIUS, beamRadius * 1.6);
       const phaseTime = timeSec * visual.flowHz + visual.phase;
-      const packetLead = fract(phaseTime);
-      const packetTrail = Math.max(0, packetLead - 0.18);
+      const packetT = fract(phaseTime);
 
-      for (let i = 0; i < visual.segments.length; i++) {
-        const segment = visual.segments[i];
-        const segmentOffset = i / Math.max(visual.segments.length - 1, 1);
-        const headPulse = Math.max(0, 1 - Math.abs(segmentOffset - packetLead) * 4.8);
-        const trailPulse = Math.max(0, 1 - Math.abs(segmentOffset - packetTrail) * 5.8);
-        const animatedRadius = beamRadius * (0.48 + headPulse * 1.55 + trailPulse * 0.4);
-        segment.scale.x = animatedRadius;
-        segment.scale.z = animatedRadius;
+      // Uniform radius on all segments — materials are shared so no per-segment mutation
+      for (const segment of visual.segments) {
+        segment.scale.x = beamRadius;
+        segment.scale.z = beamRadius;
       }
 
-      const packetPulse = 1.15 + 0.95 * (0.5 + 0.5 * Math.sin((phaseTime + 0.12) * Math.PI * 4));
-      setPositionOnPath(visual.packet.position, visual.path, packetLead);
-      visual.packet.scale.setScalar(packetRadius * packetPulse);
+      setPositionOnPath(visual.packet.position, visual.path, packetT);
+      visual.packet.scale.setScalar(packetRadius);
     }
   }
 
@@ -455,22 +449,23 @@ export class InfraSceneRenderer {
     const centerY = 1.35;
     const count = Math.max(floating.length, 1);
 
-    // Scale radius so adjacent nodes have at least ~0.22m arc spacing
-    const minArcSpacing = 0.22;
-    const neededRadius = (count * minArcSpacing) / (Math.PI * 2);
-    const radius = Math.max(baseRadius, neededRadius);
+    // Distribute across multiple rings; ~12 nodes per ring keeps them readable
+    const nodesPerRing = 12;
+    const ringCount = Math.max(1, Math.ceil(count / nodesPerRing));
+    const ringGap = 0.28; // meters between concentric rings
 
     floating.forEach((node, index) => {
-      // Distribute across 2 concentric rings for better spread
-      const ring = index % 2;
-      const ringRadius = radius * (1 + ring * 0.35);
-      const ringOffset = ring * (Math.PI / count); // stagger inner/outer
-      const angle = (index / count) * Math.PI * 2 + ringOffset;
+      const ring = index % ringCount;
+      const indexInRing = Math.floor(index / ringCount);
+      const nodesInThisRing = Math.ceil((count - ring) / ringCount);
+      const ringRadius = baseRadius + ring * ringGap;
+      const angleOffset = ring * (Math.PI / Math.max(nodesInThisRing, 1)); // stagger rings
+      const angle = (indexInRing / nodesInThisRing) * Math.PI * 2 + angleOffset;
       const candidate = this.floatingNodePositions.get(node.id) ?? new Vector3();
       candidate.set(
         center.x + Math.cos(angle) * ringRadius,
-        centerY + 0.20 * Math.sin(index * 0.8),
-        center.z + Math.sin(angle) * ringRadius * 0.7
+        centerY + 0.15 * Math.sin(index * 0.8),
+        center.z + Math.sin(angle) * ringRadius
       );
       this.floatingNodePositions.set(node.id, candidate);
       output.set(node.id, this.clampToBoundary(candidate));

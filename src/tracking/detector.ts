@@ -1,3 +1,6 @@
+import svdSource from "js-aruco2/src/svd.js?raw";
+import positSource from "js-aruco2/src/posit2.js?raw";
+
 import type { MarkerDetector, RawMarkerDetection } from "./types";
 
 interface WorkerDetection {
@@ -10,11 +13,33 @@ interface WorkerDetection {
   corners?: Array<{ x: number; y: number }>;
 }
 
+interface SolvedPose {
+  rotation: number[][];
+  translationMm: [number, number, number];
+  error: number;
+}
+
+interface WorkerDebugInfo {
+  decodedMarkers: number;
+  contourCount: number;
+  polyCount: number;
+  candidateQuadCount: number;
+  validIdCount: number;
+  candidateCount: number;
+  stableCount: number;
+  filteredCount: number;
+  rejectedInvalidId: number;
+  rejectedTooSmall: number;
+  rejectedBadAspect: number;
+  rejectedLowConfidence: number;
+}
+
 interface DetectResponseMessage {
   type: "detected";
   frameId: number;
   detections: WorkerDetection[];
   bestId: number | null;
+  debug: WorkerDebugInfo;
 }
 
 export interface CameraWorkerDetectorOptions {
@@ -27,11 +52,24 @@ export interface CameraWorkerDetectorOptions {
 export type CameraWorkerDetectorStatus = "idle" | "starting" | "ready" | "failed";
 
 const DEFAULT_MARKER_SIZE_METERS = 0.12;
-const ASSUMED_CAMERA_FOV_Y_RAD = (70 * Math.PI) / 180;
-const MIN_ESTIMATED_DISTANCE_METERS = 0.25;
-const MAX_ESTIMATED_DISTANCE_METERS = 8.0;
+const MARKER_MODEL_SIZE_MM = 120;
 const DESKTOP_CAMERA_WORLD_POS = { x: 0, y: 1.4, z: 2.5 };
 const IDENTITY_ROTATION = { x: 0, y: 0, z: 0, w: 1 };
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const positCtx: Record<string, any> = {};
+new Function(svdSource).call(positCtx);
+new Function(positSource).call(positCtx);
+const POS = positCtx.POS as { Posit?: new (modelSize: number, focalLength: number) => {
+  pose: (points: Array<{ x: number; y: number }>) => unknown;
+} } | undefined;
+if (!POS?.Posit) {
+  throw new Error("Failed to initialize POSIT solver");
+}
+const PositCtor = POS.Posit;
+
+let positSolver: { pose: (points: Array<{ x: number; y: number }>) => unknown } | null = null;
+let positFocalLengthPx = 0;
 
 /**
  * Camera-backed detector scaffold.
@@ -51,12 +89,19 @@ export class CameraWorkerMarkerDetector implements MarkerDetector {
   private context2d: CanvasRenderingContext2D | null = null;
   private latestDetections: WorkerDetection[] = [];
   private latestBestId: number | null = null;
+  private latestDebug: WorkerDebugInfo = createEmptyDebugInfo();
+  private latestSolvedPoseCount = 0;
+  private latestPoseAttemptCount = 0;
+  private latestPoseFailureReason = "none";
+  private lastDebugSignature = "";
+  private lastDebugLogAtMs = 0;
   private latestAtMs = 0;
   private frameCounter = 0;
   private workerBusy = false;
   private lastCaptureAtMs = 0;
   private isStarting = false;
   private startFailed = false;
+  private didLogFirstCapture = false;
 
   constructor(options: CameraWorkerDetectorOptions = {}) {
     this.captureWidth = options.captureWidth ?? 480;
@@ -82,16 +127,27 @@ export class CameraWorkerMarkerDetector implements MarkerDetector {
       return [];
     }
 
-    return this.latestDetections.map((detection) =>
-      toRawMarkerDetection(
+    const results: RawMarkerDetection[] = [];
+    let firstPoseFailureReason = "none";
+    for (const detection of this.latestDetections) {
+      const solved = toRawMarkerDetection(
         detection,
         now,
         this.captureWidth,
         this.captureHeight,
         _frame,
         _referenceSpace
-      )
-    );
+      );
+      if (solved.detection) {
+        results.push(solved.detection);
+      } else if (firstPoseFailureReason === "none") {
+        firstPoseFailureReason = solved.failureReason;
+      }
+    }
+    this.latestPoseAttemptCount = this.latestDetections.length;
+    this.latestSolvedPoseCount = results.length;
+    this.latestPoseFailureReason = firstPoseFailureReason;
+    return results;
   }
 
   getVideo(): HTMLVideoElement | null {
@@ -99,12 +155,25 @@ export class CameraWorkerMarkerDetector implements MarkerDetector {
   }
 
   /** Latest detections with pixel-space corners for overlay drawing. */
-  getOverlayData(): { detections: WorkerDetection[]; bestId: number | null; width: number; height: number } {
+  getOverlayData(): {
+    detections: WorkerDetection[];
+    bestId: number | null;
+    width: number;
+    height: number;
+    debug: WorkerDebugInfo;
+    solvedPoseCount: number;
+    poseAttemptCount: number;
+    poseFailureReason: string;
+  } {
     return {
       detections: this.latestDetections,
       bestId: this.latestBestId,
       width: this.captureWidth,
       height: this.captureHeight,
+      debug: this.latestDebug,
+      solvedPoseCount: this.latestSolvedPoseCount,
+      poseAttemptCount: this.latestPoseAttemptCount,
+      poseFailureReason: this.latestPoseFailureReason,
     };
   }
 
@@ -157,8 +226,15 @@ export class CameraWorkerMarkerDetector implements MarkerDetector {
     this.canvas = null;
     this.context2d = null;
     this.latestDetections = [];
+    this.latestDebug = createEmptyDebugInfo();
+    this.latestSolvedPoseCount = 0;
+    this.latestPoseAttemptCount = 0;
+    this.latestPoseFailureReason = "none";
     this.latestAtMs = 0;
     this.workerBusy = false;
+    this.lastDebugSignature = "";
+    this.lastDebugLogAtMs = 0;
+    this.didLogFirstCapture = false;
   }
 
   private async start(): Promise<void> {
@@ -212,6 +288,11 @@ export class CameraWorkerMarkerDetector implements MarkerDetector {
       const worker = new Worker(new URL("./marker-worker.ts", import.meta.url), {
         type: "module"
       });
+      console.info("[marker-worker] started", {
+        captureWidth: this.captureWidth,
+        captureHeight: this.captureHeight,
+        maxCaptureHz: Math.round(1000 / this.minCaptureDeltaMs),
+      });
 
       worker.addEventListener("message", (event: MessageEvent<DetectResponseMessage>) => {
         const payload = event.data;
@@ -220,21 +301,36 @@ export class CameraWorkerMarkerDetector implements MarkerDetector {
         }
         this.latestDetections = payload.detections;
         this.latestBestId = payload.bestId;
+        this.latestDebug = payload.debug;
+        this.latestSolvedPoseCount = 0;
+        this.latestPoseAttemptCount = 0;
+        this.latestPoseFailureReason = "none";
         this.latestAtMs = performance.now();
         this.workerBusy = false;
+        this.maybeLogDebug(payload.debug);
       });
 
       worker.addEventListener("error", () => {
+        console.error("[marker-worker] worker error");
         this.startFailed = true;
         this.latestDetections = [];
         this.latestBestId = null;
+        this.latestDebug = createEmptyDebugInfo();
+        this.latestSolvedPoseCount = 0;
+        this.latestPoseAttemptCount = 0;
+        this.latestPoseFailureReason = "none";
         this.workerBusy = false;
       });
 
       worker.addEventListener("messageerror", () => {
+        console.error("[marker-worker] worker messageerror");
         this.startFailed = true;
         this.latestDetections = [];
         this.latestBestId = null;
+        this.latestDebug = createEmptyDebugInfo();
+        this.latestSolvedPoseCount = 0;
+        this.latestPoseAttemptCount = 0;
+        this.latestPoseFailureReason = "none";
         this.workerBusy = false;
       });
 
@@ -258,6 +354,15 @@ export class CameraWorkerMarkerDetector implements MarkerDetector {
 
     this.context2d.drawImage(this.video, 0, 0, this.captureWidth, this.captureHeight);
     const imageData = this.context2d.getImageData(0, 0, this.captureWidth, this.captureHeight);
+    if (!this.didLogFirstCapture) {
+      this.didLogFirstCapture = true;
+      console.info("[marker-worker] first frame captured", {
+        captureWidth: this.captureWidth,
+        captureHeight: this.captureHeight,
+        videoWidth: this.video.videoWidth,
+        videoHeight: this.video.videoHeight,
+      });
+    }
 
     this.workerBusy = true;
     this.lastCaptureAtMs = nowMs;
@@ -273,6 +378,40 @@ export class CameraWorkerMarkerDetector implements MarkerDetector {
       },
       [imageData.data.buffer]
     );
+  }
+
+  private maybeLogDebug(debug: WorkerDebugInfo): void {
+    const payload = {
+      decodedMarkers: debug.decodedMarkers,
+      contourCount: debug.contourCount,
+      polyCount: debug.polyCount,
+      candidateQuadCount: debug.candidateQuadCount,
+      validIdCount: debug.validIdCount,
+      candidateCount: debug.candidateCount,
+      stableCount: debug.stableCount,
+      filteredCount: debug.filteredCount,
+      rejectedInvalidId: debug.rejectedInvalidId,
+      rejectedTooSmall: debug.rejectedTooSmall,
+      rejectedBadAspect: debug.rejectedBadAspect,
+      rejectedLowConfidence: debug.rejectedLowConfidence,
+    };
+    const nowMs = performance.now();
+    const signature = JSON.stringify(payload);
+    if (signature === this.lastDebugSignature && nowMs - this.lastDebugLogAtMs < 2000) {
+      return;
+    }
+    this.lastDebugSignature = signature;
+    this.lastDebugLogAtMs = nowMs;
+
+    if (debug.decodedMarkers === 0) {
+      console.warn("[marker-worker] no decoded markers", payload);
+      return;
+    }
+    if (debug.filteredCount === 0) {
+      console.warn("[marker-worker] decoded markers but nothing survived filtering", payload);
+      return;
+    }
+    console.info("[marker-worker] decoded markers available", payload);
   }
 }
 
@@ -367,34 +506,23 @@ function toRawMarkerDetection(
   captureHeight: number,
   frame: unknown,
   referenceSpace: unknown,
-): RawMarkerDetection {
-  const aspect = captureWidth / Math.max(1, captureHeight);
-  const tanHalfFovY = Math.tan(ASSUMED_CAMERA_FOV_Y_RAD * 0.5);
-  const tanHalfFovX = tanHalfFovY * aspect;
-  const focalPxY = captureHeight / (2 * tanHalfFovY);
-  const markerSidePx = estimateMarkerSidePixels(detection, captureWidth, captureHeight);
-  const estimatedDistance = clamp(
-    (DEFAULT_MARKER_SIZE_METERS * focalPxY) / Math.max(1, markerSidePx),
-    MIN_ESTIMATED_DISTANCE_METERS,
-    MAX_ESTIMATED_DISTANCE_METERS
-  );
-
-  const ndcX = (detection.xNorm - 0.5) * 2;
-  const ndcY = (0.5 - detection.yNorm) * 2;
-  const cameraRelative = {
-    x: ndcX * estimatedDistance * tanHalfFovX,
-    y: ndcY * estimatedDistance * tanHalfFovY,
-    z: -estimatedDistance,
-  };
+): { detection: RawMarkerDetection | null; failureReason: string } {
+  const poseResult = solvePoseFromCorners(detection, captureWidth, captureHeight);
+  if (!poseResult.pose) {
+    return {
+      detection: null,
+      failureReason: poseResult.failureReason
+    };
+  }
 
   const viewer = resolveViewerTransform(frame, referenceSpace) ?? {
     position: DESKTOP_CAMERA_WORLD_POS,
     rotation: IDENTITY_ROTATION
   };
 
-  const rotation = detection.corners && detection.corners.length >= 4
-    ? estimateRotationFromCorners(detection.corners, captureWidth, captureHeight)
-    : IDENTITY_ROTATION;
+  const poseEstimate = resolveCameraPoseEstimate(poseResult.pose);
+  const cameraRelative = poseEstimate.position;
+  const rotation = poseEstimate.rotation;
   const worldRotation = multiplyQuat(viewer.rotation, rotation);
   const worldPosition = addVec3(
     viewer.position,
@@ -402,99 +530,202 @@ function toRawMarkerDetection(
   );
 
   return {
-    markerId: detection.markerId,
-    pose: {
-      position: worldPosition,
-      rotation: worldRotation,
-      confidence: detection.confidence,
-      lastSeenAtMs: nowMs
+    detection: {
+      markerId: detection.markerId,
+      pose: {
+        position: worldPosition,
+        rotation: worldRotation,
+        confidence: detection.confidence,
+        lastSeenAtMs: nowMs
+      },
+      sizeMeters: DEFAULT_MARKER_SIZE_METERS
     },
-    sizeMeters: DEFAULT_MARKER_SIZE_METERS
+    failureReason: "none"
   };
 }
 
-/**
- * Estimate marker orientation from the 4 detected corner positions.
- * Uses perspective distortion cues:
- *   - Roll: angle of the top edge in image space
- *   - Pitch: ratio of top/bottom edge lengths (foreshortening)
- *   - Yaw: ratio of left/right edge lengths (foreshortening)
- * Returns a quaternion (ZYX Euler convention).
- */
-function estimateRotationFromCorners(
-  corners: Array<{ x: number; y: number }>,
-  _width: number,
-  _height: number,
-): { x: number; y: number; z: number; w: number } {
-  const [c0, c1, c2, c3] = corners;
-
-  // Roll: average angle of top and bottom edges
-  // Image Y is down, world Y is up → negate
-  const topDx = c1.x - c0.x;
-  const topDy = c1.y - c0.y;
-  const botDx = c2.x - c3.x;
-  const botDy = c2.y - c3.y;
-  const avgDx = (topDx + botDx) / 2;
-  const avgDy = (topDy + botDy) / 2;
-  const roll = -Math.atan2(avgDy, avgDx);
-
-  // Edge lengths for perspective foreshortening
-  const topLen = Math.hypot(c1.x - c0.x, c1.y - c0.y);
-  const bottomLen = Math.hypot(c2.x - c3.x, c2.y - c3.y);
-  const leftLen = Math.hypot(c3.x - c0.x, c3.y - c0.y);
-  const rightLen = Math.hypot(c2.x - c1.x, c2.y - c1.y);
-
-  const avgH = (topLen + bottomLen) / 2;
-  const avgV = (leftLen + rightLen) / 2;
-
-  // Pitch: top edge shorter than bottom → marker tilts backward
-  const pitch = avgH > 1 ? Math.atan2(bottomLen - topLen, avgH) : 0;
-  // Yaw: left edge shorter than right → marker turns left
-  const yaw = avgV > 1 ? Math.atan2(rightLen - leftLen, avgV) : 0;
-
-  return eulerZYXToQuaternion(pitch, yaw, roll);
-}
-
-/** Convert ZYX Euler angles (pitch=X, yaw=Y, roll=Z) to a quaternion. */
-function eulerZYXToQuaternion(
-  x: number,
-  y: number,
-  z: number,
-): { x: number; y: number; z: number; w: number } {
-  const cx = Math.cos(x / 2);
-  const sx = Math.sin(x / 2);
-  const cy = Math.cos(y / 2);
-  const sy = Math.sin(y / 2);
-  const cz = Math.cos(z / 2);
-  const sz = Math.sin(z / 2);
-
+function resolveCameraPoseEstimate(
+  pose: SolvedPose
+): {
+  position: { x: number; y: number; z: number };
+  rotation: { x: number; y: number; z: number; w: number };
+} {
   return {
-    x: sx * cy * cz - cx * sy * sz,
-    y: cx * sy * cz + sx * cy * sz,
-    z: cx * cy * sz - sx * sy * cz,
-    w: cx * cy * cz + sx * sy * sz,
+    position: {
+      x: pose.translationMm[0] / 1000,
+      y: pose.translationMm[1] / 1000,
+      z: -pose.translationMm[2] / 1000
+    },
+    rotation: quaternionFromPositMatrix(pose.rotation)
   };
 }
 
-function estimateMarkerSidePixels(
+function createEmptyDebugInfo(): WorkerDebugInfo {
+  return {
+    decodedMarkers: 0,
+    contourCount: 0,
+    polyCount: 0,
+    candidateQuadCount: 0,
+    validIdCount: 0,
+    candidateCount: 0,
+    stableCount: 0,
+    filteredCount: 0,
+    rejectedInvalidId: 0,
+    rejectedTooSmall: 0,
+    rejectedBadAspect: 0,
+    rejectedLowConfidence: 0,
+  };
+}
+
+function solvePoseFromCorners(
   detection: WorkerDetection,
   captureWidth: number,
   captureHeight: number
-): number {
-  if (detection.corners && detection.corners.length >= 4) {
-    const [c0, c1, c2, c3] = detection.corners;
-    const top = Math.hypot(c1.x - c0.x, c1.y - c0.y);
-    const right = Math.hypot(c2.x - c1.x, c2.y - c1.y);
-    const bottom = Math.hypot(c2.x - c3.x, c2.y - c3.y);
-    const left = Math.hypot(c3.x - c0.x, c3.y - c0.y);
-    return (top + right + bottom + left) / 4;
+): { pose: SolvedPose | null; failureReason: string } {
+  if (!detection.corners || detection.corners.length < 4) {
+    return { pose: null, failureReason: "no-corners" };
   }
 
-  return detection.sizeNorm * Math.max(captureWidth, captureHeight);
+  const focalLengthPx = captureWidth;
+  if (!positSolver || Math.abs(positFocalLengthPx - focalLengthPx) > 0.001) {
+    positSolver = new PositCtor(MARKER_MODEL_SIZE_MM, focalLengthPx);
+    positFocalLengthPx = focalLengthPx;
+  }
+
+  const centeredCorners = detection.corners.map((corner) => ({
+    x: corner.x - captureWidth * 0.5,
+    y: captureHeight * 0.5 - corner.y
+  }));
+
+  try {
+    const pose = positSolver.pose(centeredCorners) as {
+      bestError?: number;
+      bestRotation?: number[][];
+      bestTranslation?: number[];
+      alternativeError?: number;
+      alternativeRotation?: number[][];
+      alternativeTranslation?: number[];
+    };
+
+    const candidates = [
+      toSolvedPoseCandidate(pose?.bestError, pose?.bestRotation, pose?.bestTranslation),
+      toSolvedPoseCandidate(pose?.alternativeError, pose?.alternativeRotation, pose?.alternativeTranslation),
+    ].filter((candidate): candidate is SolvedPose => Boolean(candidate));
+
+    if (candidates.length === 0) {
+      return { pose: null, failureReason: "no-valid-candidate" };
+    }
+
+    candidates.sort((a, b) => a.error - b.error);
+    return { pose: candidates[0], failureReason: "none" };
+  } catch {
+    return { pose: null, failureReason: "exception" };
+  }
 }
 
-function clamp(value: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, value));
+function toSolvedPoseCandidate(
+  error: number | undefined,
+  rotation: number[][] | undefined,
+  translation: number[] | undefined
+): SolvedPose | null {
+  if (
+    typeof error !== "number" ||
+    !Array.isArray(rotation) ||
+    rotation.length !== 3 ||
+    !Array.isArray(translation) ||
+    translation.length !== 3
+  ) {
+    return null;
+  }
+
+  const translationMm = translation as [number, number, number];
+  if (
+    !Number.isFinite(translationMm[0]) ||
+    !Number.isFinite(translationMm[1]) ||
+    !Number.isFinite(translationMm[2]) ||
+    translationMm[2] <= 1
+  ) {
+    return null;
+  }
+
+  return {
+    rotation,
+    translationMm,
+    error
+  };
+}
+
+function quaternionFromPositMatrix(matrix: number[][]): { x: number; y: number; z: number; w: number } {
+  if (
+    matrix.length !== 3 ||
+    matrix.some((row) => !Array.isArray(row) || row.length !== 3)
+  ) {
+    return IDENTITY_ROTATION;
+  }
+
+  // POSIT solves in a +Z-forward camera space. Three.js camera space is +Z-backward,
+  // and our marker frame is authored for Three, so conjugate by Z flip on both sides.
+  const m00 = matrix[0][0];
+  const m01 = matrix[0][1];
+  const m02 = -matrix[0][2];
+  const m10 = matrix[1][0];
+  const m11 = matrix[1][1];
+  const m12 = -matrix[1][2];
+  const m20 = -matrix[2][0];
+  const m21 = -matrix[2][1];
+  const m22 = matrix[2][2];
+
+  const trace = m00 + m11 + m22;
+  if (trace > 0) {
+    const s = Math.sqrt(trace + 1) * 2;
+    return normalizeQuaternion({
+      w: 0.25 * s,
+      x: (m21 - m12) / s,
+      y: (m02 - m20) / s,
+      z: (m10 - m01) / s
+    });
+  }
+  if (m00 > m11 && m00 > m22) {
+    const s = Math.sqrt(1 + m00 - m11 - m22) * 2;
+    return normalizeQuaternion({
+      w: (m21 - m12) / s,
+      x: 0.25 * s,
+      y: (m01 + m10) / s,
+      z: (m02 + m20) / s
+    });
+  }
+  if (m11 > m22) {
+    const s = Math.sqrt(1 + m11 - m00 - m22) * 2;
+    return normalizeQuaternion({
+      w: (m02 - m20) / s,
+      x: (m01 + m10) / s,
+      y: 0.25 * s,
+      z: (m12 + m21) / s
+    });
+  }
+
+  const s = Math.sqrt(1 + m22 - m00 - m11) * 2;
+  return normalizeQuaternion({
+    w: (m10 - m01) / s,
+    x: (m02 + m20) / s,
+    y: (m12 + m21) / s,
+    z: 0.25 * s
+  });
+}
+
+function normalizeQuaternion(q: { x: number; y: number; z: number; w: number }): {
+  x: number; y: number; z: number; w: number;
+} {
+  const length = Math.hypot(q.x, q.y, q.z, q.w);
+  if (length < 1e-6) {
+    return IDENTITY_ROTATION;
+  }
+  return {
+    x: q.x / length,
+    y: q.y / length,
+    z: q.z / length,
+    w: q.w / length
+  };
 }
 
 function addVec3(

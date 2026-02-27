@@ -282,17 +282,20 @@ export async function bootstrapApp(): Promise<void> {
   const scene = new Scene();
   scene.background = new Color("#091419");
 
+  const desktopCanvasWidth = window.innerWidth;
+  const desktopCanvasHeight = Math.max(1, Math.floor(window.innerHeight * 0.75));
   const camera = new PerspectiveCamera(
     70,
-    window.innerWidth / Math.max(window.innerHeight, 1),
+    desktopCanvasWidth / desktopCanvasHeight,
     0.01,
     100
   );
   camera.position.set(0, 1.4, 2.5);
+  scene.add(camera);
 
   const renderer = new WebGLRenderer({ antialias: true, alpha: true });
   renderer.setPixelRatio(window.devicePixelRatio);
-  renderer.setSize(window.innerWidth, window.innerHeight * 0.75);
+  renderer.setSize(desktopCanvasWidth, desktopCanvasHeight);
   canvasHolder.append(renderer.domElement);
 
   const ambient = new AmbientLight(0xffffff, 0.5);
@@ -310,6 +313,20 @@ export async function bootstrapApp(): Promise<void> {
   cameraPiPMesh.visible = false;
   cameraPiPMesh.position.set(0.55, 1.55, -1.05);
   cameraPiPMesh.name = "camera-pip";
+
+  const cameraFeedMesh = new Mesh(
+    new PlaneGeometry(1, 1),
+    new MeshBasicMaterial({
+      color: 0xffffff,
+      depthTest: false,
+      depthWrite: false
+    })
+  );
+  cameraFeedMesh.visible = false;
+  cameraFeedMesh.renderOrder = -1000;
+  cameraFeedMesh.position.set(0, 0, -0.05);
+  cameraFeedMesh.name = "camera-feed";
+  camera.add(cameraFeedMesh);
 
   scene.add(ambient, keyLight, cameraPiPMesh);
 
@@ -476,6 +493,67 @@ export async function bootstrapApp(): Promise<void> {
     cameraPiPMesh.visible = false;
   };
 
+  const clearDesktopCameraFeed = (): void => {
+    if (videoTexture) {
+      videoTexture.dispose();
+      videoTexture = null;
+    }
+
+    const material = cameraFeedMesh.material;
+    if (material instanceof MeshBasicMaterial) {
+      material.map = null;
+      material.needsUpdate = true;
+    }
+    cameraFeedMesh.visible = false;
+    scene.background = defaultBackground;
+  };
+
+  const updateDesktopCameraFeed = (): void => {
+    if (!desktopTrackingActive || switchableDetector.getMode() !== "camera") {
+      clearDesktopCameraFeed();
+      return;
+    }
+
+    const video = switchableDetector.camera.getVideo();
+    if (!video || video.readyState < 2) {
+      clearDesktopCameraFeed();
+      return;
+    }
+
+    if (!videoTexture) {
+      videoTexture = new VideoTexture(video);
+      const material = cameraFeedMesh.material;
+      if (material instanceof MeshBasicMaterial) {
+        material.map = videoTexture;
+        material.needsUpdate = true;
+      }
+    }
+
+    videoTexture.needsUpdate = true;
+    scene.background = defaultBackground;
+
+    const distance = 0.05;
+    const fovYRad = (camera.fov * Math.PI) / 180;
+    const viewHeight = 2 * distance * Math.tan(fovYRad * 0.5);
+    const viewWidth = viewHeight * camera.aspect;
+    const videoAspect =
+      video.videoWidth > 0 && video.videoHeight > 0
+        ? video.videoWidth / video.videoHeight
+        : switchableDetector.camera.getOverlayData().width /
+          Math.max(1, switchableDetector.camera.getOverlayData().height);
+
+    let planeWidth = viewWidth;
+    let planeHeight = planeWidth / Math.max(videoAspect, 0.0001);
+    if (planeHeight > viewHeight) {
+      planeHeight = viewHeight;
+      planeWidth = planeHeight * videoAspect;
+    }
+
+    cameraFeedMesh.position.set(0, 0, -distance);
+    cameraFeedMesh.scale.set(planeWidth, planeHeight, 1);
+    cameraFeedMesh.visible = true;
+  };
+
   const ensureCameraPiPCanvasTexture = (): void => {
     const material = cameraPiPMesh.material;
     if (!(material instanceof MeshBasicMaterial) || cameraPiPTexture) {
@@ -537,19 +615,8 @@ export async function bootstrapApp(): Promise<void> {
           frame: null,
           referenceSpace: null,
         });
-
-        // Attach camera feed as scene background once the video is ready
-        if (!videoTexture && switchableDetector.getMode() === "camera") {
-          const video = switchableDetector.camera.getVideo();
-          if (video && video.readyState >= 2) {
-            videoTexture = new VideoTexture(video);
-            scene.background = videoTexture;
-          }
-        }
-        if (videoTexture) {
-          videoTexture.needsUpdate = true;
-        }
       }
+      updateDesktopCameraFeed();
       if (cameraPiPCtx) {
         drawCameraPiP(cameraPiPCtx, cameraPiPCanvas, switchableDetector, cameraPiPLabel);
       }
@@ -701,6 +768,7 @@ export async function bootstrapApp(): Promise<void> {
         mode: "immersive-ar",
         domOverlayRoot: wrapper
       });
+      clearDesktopCameraFeed();
       if (desktopLoopHandle) {
         window.cancelAnimationFrame(desktopLoopHandle);
         desktopLoopHandle = 0;
@@ -738,13 +806,8 @@ export async function bootstrapApp(): Promise<void> {
       cameraTrackButton.style.background = "#0f4830";
       trackingStats.textContent = "Tracking markers: 0";
 
-      // Restore default background
-      if (videoTexture) {
-        videoTexture.dispose();
-        videoTexture = null;
-      }
+      clearDesktopCameraFeed();
       clearCameraPiPTexture();
-      scene.background = defaultBackground;
     } else {
       desktopTrackingActive = true;
       await refreshCameraPermissionState();
@@ -776,13 +839,8 @@ export async function bootstrapApp(): Promise<void> {
       mockToggle.textContent = "Mode: Mock";
       mockToggle.style.border = "1px solid #6a5a2a";
       mockToggle.style.background = "#3f3520";
-      // Drop video background in mock mode
-      if (videoTexture) {
-        videoTexture.dispose();
-        videoTexture = null;
-      }
+      clearDesktopCameraFeed();
       clearCameraPiPTexture();
-      scene.background = defaultBackground;
     } else {
       switchableDetector.setMode("camera");
       mockToggle.textContent = "Mode: Camera";
@@ -815,12 +873,16 @@ export async function bootstrapApp(): Promise<void> {
   });
 
   window.addEventListener("resize", () => {
-    camera.aspect = window.innerWidth / Math.max(window.innerHeight, 1);
+    const nextWidth = window.innerWidth;
+    const nextHeight = Math.max(1, Math.floor(window.innerHeight * 0.75));
+    camera.aspect = nextWidth / nextHeight;
     camera.updateProjectionMatrix();
-    renderer.setSize(window.innerWidth, window.innerHeight * 0.75);
+    renderer.setSize(nextWidth, nextHeight);
+    updateDesktopCameraFeed();
   });
 
   window.addEventListener("beforeunload", () => {
+    clearDesktopCameraFeed();
     clearCameraPiPTexture();
     if (cameraPermissionStatus) {
       cameraPermissionStatus.removeEventListener("change", onPermissionChange);
@@ -892,7 +954,14 @@ function drawCameraPiP(
   }
 
   label.textContent =
-    `Camera PiP: ${overlay.width}x${overlay.height} | detections ${overlay.detections.length}`;
+    `Camera PiP: ${overlay.width}x${overlay.height}` +
+    ` | decoded ${overlay.debug.decodedMarkers}` +
+    ` | quads ${overlay.debug.candidateQuadCount}` +
+    ` | candidates ${overlay.debug.candidateCount}` +
+    ` | stable ${overlay.debug.stableCount}` +
+    ` | filtered ${overlay.debug.filteredCount}` +
+    ` | pose ${overlay.solvedPoseCount}/${overlay.poseAttemptCount}` +
+    ` | pFail ${overlay.poseFailureReason}`;
 
   ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
   const sx = canvas.width / overlay.width;
