@@ -19,6 +19,7 @@ export type AppErrorCode =
   | "XR_UNAVAILABLE"
   | "XR_SESSION_START_FAILED"
   | "XR_SESSION_STOP_FAILED"
+  | "CAMERA_PERMISSION_FAILED"
   | "TRACKING_INIT_FAILED"
   | "TOPOLOGY_LOAD_FAILED"
   | "TELEMETRY_STREAM_FAILED"
@@ -56,6 +57,12 @@ export interface PerformanceSampleEvent {
   timestampMs: number;
 }
 
+export interface TrackingStatusEvent {
+  backend: "camera-worker" | "mock" | "custom";
+  detectorStatus: "idle" | "starting" | "ready" | "failed";
+  timestampMs: number;
+}
+
 export interface AppEventMap {
   "xr/state": {
     state: XrRuntimeState;
@@ -70,6 +77,7 @@ export interface AppEventMap {
     markers: TrackedMarker[];
     timestampMs: number;
   };
+  "tracking/status": TrackingStatusEvent;
   "topology/snapshot": {
     snapshot: TopologySnapshot;
     timestampMs: number;

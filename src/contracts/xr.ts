@@ -28,6 +28,11 @@ export interface XrFrameTick {
   referenceSpace: unknown;
 }
 
+export interface XrBoundaryPoint {
+  x: number;
+  z: number;
+}
+
 export interface XrSessionStartOptions {
   mode?: XrSessionMode;
   referenceSpaceOrder?: XrReferenceSpaceType[];

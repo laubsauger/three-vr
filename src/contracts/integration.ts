@@ -1,5 +1,10 @@
 import type { AppEventMap } from "./events";
-import type { XrCapabilities, XrRuntimeState, XrSessionStartOptions } from "./xr";
+import type {
+  XrBoundaryPoint,
+  XrCapabilities,
+  XrRuntimeState,
+  XrSessionStartOptions
+} from "./xr";
 
 export interface AppEventBus {
   emit<TEventName extends keyof AppEventMap>(
@@ -21,6 +26,7 @@ export interface XrRuntimePort {
   getState(): XrRuntimeState;
   getSession(): unknown;
   getReferenceSpace(): unknown;
+  getBoundaryPolygon(): XrBoundaryPoint[] | null;
   detectCapabilities(): Promise<XrCapabilities>;
   start(options?: XrSessionStartOptions): Promise<void>;
   stop(): Promise<void>;

@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Parity Marker Generator</title>
+    <style>
+      body {
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+        margin: 24px;
+      }
+      .controls {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 12px;
+        flex-wrap: wrap;
+      }
+      input,
+      button {
+        font-size: 14px;
+        padding: 8px 10px;
+      }
+      canvas {
+        border: 1px solid #333;
+        image-rendering: pixelated;
+      }
+      pre {
+        background: #f5f5f7;
+        padding: 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Parity Marker Generator</h1>
+    <p>Generates printable 6x6 black-border markers for IDs 0-511. Recommended demo IDs: 101, 102, 103.</p>
+
+    <div class="controls">
+      <label>ID <input id="marker-id" type="number" min="0" max="511" value="101" /></label>
+      <label>Scale(px per cell) <input id="scale" type="number" min="10" max="200" value="60" /></label>
+      <button id="render">Render</button>
+      <button id="print">Print</button>
+    </div>
+
+    <canvas id="canvas" width="360" height="360"></canvas>
+    <pre id="bits"></pre>
+
+    <script>
+      const idInput = document.getElementById("marker-id");
+      const scaleInput = document.getElementById("scale");
+      const canvas = document.getElementById("canvas");
+      const bitsOut = document.getElementById("bits");
+
+      function markerMatrixFromId(id) {
+        const value = Math.max(0, Math.min(511, Number(id) || 0));
+
+        const payload = Array.from({ length: 4 }, () => Array(4).fill(0));
+        let bitCursor = 8;
+        for (let r = 0; r < 3; r++) {
+          for (let c = 0; c < 3; c++) {
+            payload[r][c] = (value >> bitCursor) & 1;
+            bitCursor--;
+          }
+        }
+
+        for (let r = 0; r < 3; r++) {
+          payload[r][3] = payload[r][0] ^ payload[r][1] ^ payload[r][2];
+        }
+        for (let c = 0; c < 3; c++) {
+          payload[3][c] = payload[0][c] ^ payload[1][c] ^ payload[2][c];
+        }
+
+        payload[3][3] =
+          payload[0][0] ^ payload[0][1] ^ payload[0][2] ^
+          payload[1][0] ^ payload[1][1] ^ payload[1][2] ^
+          payload[2][0] ^ payload[2][1] ^ payload[2][2];
+
+        const full = Array.from({ length: 6 }, () => Array(6).fill(1));
+        for (let r = 0; r < 4; r++) {
+          for (let c = 0; c < 4; c++) {
+            full[r + 1][c + 1] = payload[r][c];
+          }
+        }
+
+        return { id: value, full };
+      }
+
+      function draw() {
+        const id = Number(idInput.value);
+        const scale = Math.max(10, Math.min(200, Number(scaleInput.value) || 60));
+        const marker = markerMatrixFromId(id);
+
+        canvas.width = scale * 6;
+        canvas.height = scale * 6;
+        const ctx = canvas.getContext("2d");
+
+        ctx.fillStyle = "white";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        for (let r = 0; r < 6; r++) {
+          for (let c = 0; c < 6; c++) {
+            const dark = marker.full[r][c] === 1;
+            ctx.fillStyle = dark ? "black" : "white";
+            ctx.fillRect(c * scale, r * scale, scale, scale);
+          }
+        }
+
+        bitsOut.textContent = `ID ${marker.id}\n` + marker.full.map((row) => row.join(" ")).join("\n");
+      }
+
+      document.getElementById("render").addEventListener("click", draw);
+      document.getElementById("print").addEventListener("click", () => {
+        draw();
+        window.print();
+      });
+
+      draw();
+    </script>
+  </body>
+</html>

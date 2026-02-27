@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      js-aruco2:
+        specifier: ^2.0.0
+        version: 2.0.0
       three:
         specifier: ^0.181.1
         version: 0.181.2
@@ -348,6 +351,10 @@ packages:
     engines: {node: ^8.16.0 || ^10.6.0 || >=11.0.0}
     os: [darwin]
 
+  js-aruco2@2.0.0:
+    resolution: {integrity: sha512-2R9P7INqIkg1fsGBazSDLChmfwJpbaYN26gO6wFr1TLIOrvwQf0YzuhwVZAPF8frQ4cjdppAN0dRmExEd/6wqw==}
+    engines: {node: '>=12.0.0'}
+
   meshoptimizer@0.22.0:
     resolution: {integrity: sha512-IebiK79sqIy+E4EgOr+CAw+Ke8hAspXKzBd0JdgEmPHiAwmvEj2S4h1rfvo+o/BnfEYd/jAOg5IeeIjzlzSnDg==}
 
@@ -642,6 +649,8 @@ snapshots:
 
   fsevents@2.3.3:
     optional: true
+
+  js-aruco2@2.0.0: {}
 
   meshoptimizer@0.22.0: {}
 

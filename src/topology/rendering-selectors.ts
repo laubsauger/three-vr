@@ -17,7 +17,8 @@ export interface RenderLinkView {
   health: HealthState;
   utilizationPct: number;
   beamColorHex: string;
-  pulseHz: number;
+  beamRadius: number;
+  flowHz: number;
 }
 
 export interface RenderGraphView {
@@ -43,7 +44,8 @@ export function selectRenderGraphView(snapshot: TopologySnapshot): RenderGraphVi
       health: link.metrics.status,
       utilizationPct: link.metrics.utilizationPct ?? 0,
       beamColorHex: selectLinkColor(link.metrics.status),
-      pulseHz: selectPulseFrequency(link.metrics.utilizationPct ?? 0)
+      beamRadius: selectBeamRadius(link.medium),
+      flowHz: selectFlowFrequency(link.metrics.utilizationPct ?? 0)
     }))
   };
 }
@@ -61,7 +63,21 @@ function selectLinkColor(status: HealthState): string {
   return "#9fb4be";
 }
 
-function selectPulseFrequency(utilizationPct: number): number {
+function selectBeamRadius(medium: string): number {
+  if (medium === "fiber") {
+    return 0.032;
+  }
+  if (medium === "wired") {
+    return 0.026;
+  }
+  if (medium === "wireless") {
+    return 0.02;
+  }
+  return 0.018;
+}
+
+function selectFlowFrequency(utilizationPct: number): number {
   const clamped = Math.max(0, Math.min(utilizationPct, 100));
-  return 0.4 + (clamped / 100) * 2.4;
+  // Keep flow legible: roughly one packet hop every ~2-6 seconds.
+  return 0.16 + (clamped / 100) * 0.34;
 }

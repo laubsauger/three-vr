@@ -1,6 +1,7 @@
 import { WebGLRenderer } from "three";
 
 import type {
+  XrBoundaryPoint,
   XrCapabilities,
   XrFrameTick,
   XrReferenceSpaceType,
@@ -29,6 +30,15 @@ interface SessionLike {
   requestReferenceSpace(type: XrReferenceSpaceType): Promise<unknown>;
 }
 
+interface BoundaryPointLike {
+  x: number;
+  z: number;
+}
+
+interface ReferenceSpaceLike {
+  boundsGeometry?: BoundaryPointLike[];
+}
+
 const DEFAULT_REQUIRED_FEATURES = ["local-floor"];
 
 const DEFAULT_OPTIONAL_FEATURES = [
@@ -42,10 +52,16 @@ const DEFAULT_OPTIONAL_FEATURES = [
 ];
 
 const DEFAULT_REFERENCE_SPACE_ORDER: XrReferenceSpaceType[] = [
+  "bounded-floor",
   "local-floor",
   "local",
   "viewer"
 ];
+
+interface ResolvedReferenceSpace {
+  type: XrReferenceSpaceType;
+  space: unknown;
+}
 
 export class XrRuntime {
   private readonly renderer: WebGLRenderer;
@@ -53,6 +69,8 @@ export class XrRuntime {
   private state: XrRuntimeState = "idle";
   private session: SessionLike | null = null;
   private referenceSpace: unknown = null;
+  private referenceSpaceType: XrReferenceSpaceType | null = null;
+  private boundaryPolygon: XrBoundaryPoint[] | null = null;
   private frameTimeMs = 0;
   private capabilitiesCache: XrCapabilities | null = null;
   private readonly onSessionEndBound: EventListener;
@@ -75,6 +93,14 @@ export class XrRuntime {
 
   getReferenceSpace(): unknown {
     return this.referenceSpace;
+  }
+
+  getReferenceSpaceType(): XrReferenceSpaceType | null {
+    return this.referenceSpaceType;
+  }
+
+  getBoundaryPolygon(): XrBoundaryPoint[] | null {
+    return this.boundaryPolygon ? this.boundaryPolygon.map((point) => ({ ...point })) : null;
   }
 
   subscribeFrame(handler: (tick: XrFrameTick) => void): () => void {
@@ -141,10 +167,13 @@ export class XrRuntime {
       session.addEventListener("end", this.onSessionEndBound);
 
       this.session = session;
-      this.referenceSpace = await this.resolveReferenceSpace(
+      const resolved = await this.resolveReferenceSpace(
         session,
         options.referenceSpaceOrder ?? DEFAULT_REFERENCE_SPACE_ORDER
       );
+      this.referenceSpace = resolved.space;
+      this.referenceSpaceType = resolved.type;
+      this.boundaryPolygon = this.extractBoundaryPolygon(resolved.space, resolved.type);
       this.frameTimeMs = 0;
       this.state = "running";
 
@@ -192,6 +221,8 @@ export class XrRuntime {
     this.renderer.setAnimationLoop(null);
     this.session = null;
     this.referenceSpace = null;
+    this.referenceSpaceType = null;
+    this.boundaryPolygon = null;
     this.frameTimeMs = 0;
     this.state = "idle";
   }
@@ -215,16 +246,39 @@ export class XrRuntime {
   private async resolveReferenceSpace(
     session: SessionLike,
     referenceSpaceOrder: XrReferenceSpaceType[]
-  ): Promise<unknown> {
+  ): Promise<ResolvedReferenceSpace> {
     for (const referenceType of referenceSpaceOrder) {
       try {
-        return await session.requestReferenceSpace(referenceType);
+        const space = await session.requestReferenceSpace(referenceType);
+        return {
+          type: referenceType,
+          space
+        };
       } catch {
         continue;
       }
     }
 
     throw new Error("Unable to resolve a supported XR reference space.");
+  }
+
+  private extractBoundaryPolygon(
+    referenceSpace: unknown,
+    referenceType: XrReferenceSpaceType
+  ): XrBoundaryPoint[] | null {
+    if (referenceType !== "bounded-floor") {
+      return null;
+    }
+
+    const maybeSpace = referenceSpace as ReferenceSpaceLike | null;
+    if (!maybeSpace?.boundsGeometry || maybeSpace.boundsGeometry.length < 3) {
+      return null;
+    }
+
+    return maybeSpace.boundsGeometry.map((point) => ({
+      x: point.x,
+      z: point.z
+    }));
   }
 
   private getNavigatorXr(): NavigatorXrLike | null {

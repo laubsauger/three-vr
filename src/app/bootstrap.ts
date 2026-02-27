@@ -18,9 +18,43 @@ import { PerformanceMonitor } from "./performance-monitor";
 import { createDefaultAgentSuite } from "./agent-suite";
 import { createIntegrationCoordinator } from "./integration";
 import { selectRenderGraphView, selectTopologyStats } from "../topology";
+import kmlText from "../../docs/bombay-beach-feb-27-2026.kml?raw";
 
 function toLabel(state: XrRuntimeState): string {
   return `XR state: ${state}`;
+}
+
+type CameraProbeState = "not-requested" | "granted" | "denied" | "unsupported";
+
+interface MarkerCalibrationState {
+  firstSeenMs: number;
+  lastSeenMs: number;
+  confidence: number;
+}
+
+async function requestEnvironmentCameraProbe(): Promise<CameraProbeState> {
+  if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== "function") {
+    return "unsupported";
+  }
+
+  let stream: MediaStream | null = null;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: { ideal: "environment" }
+      },
+      audio: false
+    });
+    return "granted";
+  } catch {
+    return "denied";
+  } finally {
+    if (stream) {
+      for (const track of stream.getTracks()) {
+        track.stop();
+      }
+    }
+  }
 }
 
 export async function bootstrapApp(): Promise<void> {
@@ -85,6 +119,29 @@ export async function bootstrapApp(): Promise<void> {
   trackingStats.style.opacity = "0.85";
   trackingStats.textContent = "Tracking markers: 0";
 
+  const trackingBackendLabel = document.createElement("div");
+  trackingBackendLabel.style.fontSize = "12px";
+  trackingBackendLabel.style.opacity = "0.85";
+  trackingBackendLabel.textContent = "Tracking backend: unknown";
+
+  const calibrationLabel = document.createElement("div");
+  calibrationLabel.style.fontSize = "12px";
+  calibrationLabel.style.opacity = "0.9";
+  calibrationLabel.style.marginTop = "6px";
+  calibrationLabel.style.marginBottom = "2px";
+  calibrationLabel.textContent = "Calibration: waiting for markers";
+
+  const calibrationPanel = document.createElement("pre");
+  calibrationPanel.style.margin = "0";
+  calibrationPanel.style.padding = "8px";
+  calibrationPanel.style.background = "rgba(8, 14, 18, 0.62)";
+  calibrationPanel.style.border = "1px solid rgba(88, 131, 144, 0.4)";
+  calibrationPanel.style.borderRadius = "8px";
+  calibrationPanel.style.whiteSpace = "pre-wrap";
+  calibrationPanel.style.fontSize = "12px";
+  calibrationPanel.style.lineHeight = "1.4";
+  calibrationPanel.textContent = "No marker observations yet.";
+
   const topologyStatsLabel = document.createElement("div");
   topologyStatsLabel.style.fontSize = "12px";
   topologyStatsLabel.style.opacity = "0.85";
@@ -94,6 +151,11 @@ export async function bootstrapApp(): Promise<void> {
   telemetryStatsLabel.style.fontSize = "12px";
   telemetryStatsLabel.style.opacity = "0.85";
   telemetryStatsLabel.textContent = "Telemetry: waiting for stream";
+
+  const cameraStatsLabel = document.createElement("div");
+  cameraStatsLabel.style.fontSize = "12px";
+  cameraStatsLabel.style.opacity = "0.85";
+  cameraStatsLabel.textContent = "Camera: not requested";
 
   const selectionStatsLabel = document.createElement("div");
   selectionStatsLabel.style.fontSize = "12px";
@@ -111,8 +173,12 @@ export async function bootstrapApp(): Promise<void> {
     stateLabel,
     frameStats,
     trackingStats,
+    trackingBackendLabel,
+    calibrationLabel,
+    calibrationPanel,
     topologyStatsLabel,
     telemetryStatsLabel,
+    cameraStatsLabel,
     selectionStatsLabel,
     capabilitiesLabel,
     canvasHolder
@@ -152,6 +218,8 @@ export async function bootstrapApp(): Promise<void> {
   const xrPerformance = new PerformanceMonitor();
   const desktopPerformance = new PerformanceMonitor();
   let lastPerfEmitMs = 0;
+  let cameraProbeState: CameraProbeState = "not-requested";
+  const markerCalibration = new Map<number, MarkerCalibrationState>();
 
   const emitError = (
     code: AppErrorCode,
@@ -181,7 +249,8 @@ export async function bootstrapApp(): Promise<void> {
     createDefaultAgentSuite({
       scene,
       camera,
-      renderer
+      renderer,
+      kmlText,
     })
   );
 
@@ -271,11 +340,44 @@ export async function bootstrapApp(): Promise<void> {
   });
 
   events.on("tracking/markers", (payload) => {
+    const now = payload.timestampMs;
     const markerIds = payload.markers.map((marker) => marker.markerId).join(", ");
     trackingStats.textContent =
       payload.markers.length > 0
         ? `Tracking markers: ${payload.markers.length} [${markerIds}]`
-        : "Tracking markers: 0";
+        : "Tracking markers: 0 (requires active XR session)";
+
+    const visible = new Set<number>();
+    for (const marker of payload.markers) {
+      visible.add(marker.markerId);
+      const existing = markerCalibration.get(marker.markerId);
+      if (!existing) {
+        markerCalibration.set(marker.markerId, {
+          firstSeenMs: now,
+          lastSeenMs: now,
+          confidence: marker.pose.confidence
+        });
+      } else {
+        existing.lastSeenMs = now;
+        existing.confidence = marker.pose.confidence;
+      }
+    }
+
+    for (const [markerId, state] of markerCalibration) {
+      if (visible.has(markerId)) {
+        continue;
+      }
+      if (now - state.lastSeenMs > 3000) {
+        markerCalibration.delete(markerId);
+      }
+    }
+
+    renderCalibrationPanel(calibrationLabel, calibrationPanel, markerCalibration, now);
+  });
+
+  events.on("tracking/status", (payload) => {
+    trackingBackendLabel.textContent =
+      `Tracking backend: ${payload.backend} (${payload.detectorStatus})`;
   });
 
   events.on("topology/snapshot", (payload) => {
@@ -307,6 +409,25 @@ export async function bootstrapApp(): Promise<void> {
 
   startButton.addEventListener("click", async () => {
     try {
+      if (cameraProbeState !== "granted") {
+        cameraProbeState = await requestEnvironmentCameraProbe();
+      }
+
+      if (cameraProbeState === "granted") {
+        cameraStatsLabel.textContent = "Camera: granted";
+      } else if (cameraProbeState === "denied") {
+        cameraStatsLabel.textContent = "Camera: denied";
+        emitError(
+          "CAMERA_PERMISSION_FAILED",
+          "Camera permission denied. Marker tracking will not work with real camera detectors.",
+          true
+        );
+      } else if (cameraProbeState === "unsupported") {
+        cameraStatsLabel.textContent = "Camera: unsupported in this browser";
+      } else {
+        cameraStatsLabel.textContent = "Camera: not requested";
+      }
+
       await xrRuntime.start({
         mode: "immersive-ar",
         domOverlayRoot: wrapper
@@ -351,4 +472,40 @@ export async function bootstrapApp(): Promise<void> {
   });
 
   setState();
+}
+
+function renderCalibrationPanel(
+  label: HTMLDivElement,
+  panel: HTMLPreElement,
+  markerCalibration: Map<number, MarkerCalibrationState>,
+  nowMs: number
+): void {
+  const rows = [...markerCalibration.entries()]
+    .sort((a, b) => b[1].confidence - a[1].confidence)
+    .slice(0, 8);
+
+  if (rows.length === 0) {
+    label.textContent = "Calibration: waiting for markers";
+    panel.textContent = "No marker observations yet.";
+    return;
+  }
+
+  let readyCount = 0;
+  const lines = rows.map(([markerId, state]) => {
+    const lockMs = Math.max(0, nowMs - state.firstSeenMs);
+    if (state.confidence >= 0.72 && lockMs >= 1200) {
+      readyCount++;
+    }
+    return (
+      `ID ${markerId} | conf ${state.confidence.toFixed(2)} | lock ${(lockMs / 1000).toFixed(1)}s` +
+      ` | age ${((nowMs - state.lastSeenMs) / 1000).toFixed(1)}s`
+    );
+  });
+
+  if (readyCount > 0) {
+    label.textContent = `Calibration: ready (${readyCount} stable marker${readyCount > 1 ? "s" : ""})`;
+  } else {
+    label.textContent = "Calibration: acquiring stable marker lock";
+  }
+  panel.textContent = lines.join("\n");
 }

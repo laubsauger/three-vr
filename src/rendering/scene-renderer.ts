@@ -1,9 +1,11 @@
 import {
   BufferGeometry,
   Color,
+  CylinderGeometry,
+  DoubleSide,
   Group,
-  Line,
   LineBasicMaterial,
+  LineLoop,
   Mesh,
   MeshStandardMaterial,
   Scene,
@@ -12,11 +14,18 @@ import {
 } from "three";
 
 import type { RenderGraphView, RenderLinkView, RenderNodeView } from "../topology";
-import type { TrackedMarker } from "../contracts";
+import type { TrackedMarker, XrBoundaryPoint } from "../contracts";
 
 interface LinkVisualState {
-  line: Line<BufferGeometry, LineBasicMaterial>;
-  pulseHz: number;
+  group: Group;
+  beam: Mesh<CylinderGeometry, MeshStandardMaterial>;
+  packetA: Mesh<SphereGeometry, MeshStandardMaterial>;
+  packetB: Mesh<SphereGeometry, MeshStandardMaterial>;
+  flowHz: number;
+  beamRadius: number;
+  from: Vector3;
+  to: Vector3;
+  phase: number;
 }
 
 interface SelectableMeta {
@@ -25,6 +34,8 @@ interface SelectableMeta {
 }
 
 export class InfraSceneRenderer {
+  private static readonly UP = new Vector3(0, 1, 0);
+
   private readonly root = new Group();
   private readonly nodeGroup = new Group();
   private readonly linkGroup = new Group();
@@ -32,6 +43,10 @@ export class InfraSceneRenderer {
   private readonly nodeMeshes = new Map<string, Mesh<SphereGeometry, MeshStandardMaterial>>();
   private readonly linkMeshes = new Map<string, LinkVisualState>();
   private graph: RenderGraphView = { nodes: [], links: [] };
+  private boundaryPolygon: XrBoundaryPoint[] | null = null;
+  private boundaryLoop: LineLoop<BufferGeometry, LineBasicMaterial> | null = null;
+  private readonly tmpMid = new Vector3();
+  private readonly tmpDir = new Vector3();
 
   constructor(scene: Scene) {
     this.root.name = "infra-root";
@@ -59,11 +74,29 @@ export class InfraSceneRenderer {
     this.recomputeLayout();
   }
 
+  setBoundaryPolygon(boundary: XrBoundaryPoint[] | null): void {
+    this.boundaryPolygon = boundary && boundary.length >= 3 ? boundary.map((point) => ({ ...point })) : null;
+    this.updateBoundaryVisual();
+    this.recomputeLayout();
+  }
+
   tick(timeMs: number): void {
     const timeSec = timeMs / 1000;
     for (const visual of this.linkMeshes.values()) {
-      const intensity = 0.35 + 0.65 * (0.5 + 0.5 * Math.sin(timeSec * visual.pulseHz * Math.PI * 2));
-      visual.line.material.opacity = intensity;
+      const bodyPulse =
+        0.4 + 0.6 * (0.5 + 0.5 * Math.sin((timeSec * visual.flowHz + visual.phase) * Math.PI * 2));
+      visual.beam.material.opacity = 0.32 + bodyPulse * 0.3;
+      visual.beam.material.emissiveIntensity = 0.2 + bodyPulse * 0.45;
+
+      const packetLead = fract(timeSec * visual.flowHz + visual.phase);
+      const packetTrail = fract(packetLead + 0.5);
+      setPositionAt(visual.packetA.position, visual.from, visual.to, packetLead);
+      setPositionAt(visual.packetB.position, visual.from, visual.to, packetTrail);
+
+      const packetFlash =
+        0.5 + 0.5 * Math.sin((timeSec * visual.flowHz + visual.phase + 0.15) * Math.PI * 4);
+      visual.packetA.material.emissiveIntensity = 0.8 + packetFlash * 0.9;
+      visual.packetB.material.emissiveIntensity = 0.8 + packetFlash * 0.9;
     }
   }
 
@@ -76,11 +109,22 @@ export class InfraSceneRenderer {
     this.nodeMeshes.clear();
 
     for (const visual of this.linkMeshes.values()) {
-      visual.line.geometry.dispose();
-      visual.line.material.dispose();
-      this.linkGroup.remove(visual.line);
+      visual.beam.geometry.dispose();
+      visual.beam.material.dispose();
+      visual.packetA.geometry.dispose();
+      visual.packetA.material.dispose();
+      visual.packetB.geometry.dispose();
+      visual.packetB.material.dispose();
+      this.linkGroup.remove(visual.group);
     }
     this.linkMeshes.clear();
+
+    if (this.boundaryLoop) {
+      this.boundaryLoop.geometry.dispose();
+      this.boundaryLoop.material.dispose();
+      this.boundaryLoop.removeFromParent();
+      this.boundaryLoop = null;
+    }
 
     this.root.removeFromParent();
   }
@@ -129,40 +173,97 @@ export class InfraSceneRenderer {
       if (nextIds.has(linkId)) {
         continue;
       }
-      visual.line.geometry.dispose();
-      visual.line.material.dispose();
-      visual.line.removeFromParent();
+      visual.beam.geometry.dispose();
+      visual.beam.material.dispose();
+      visual.packetA.geometry.dispose();
+      visual.packetA.material.dispose();
+      visual.packetB.geometry.dispose();
+      visual.packetB.material.dispose();
+      visual.group.removeFromParent();
       this.linkMeshes.delete(linkId);
     }
 
     for (const link of links) {
       let visual = this.linkMeshes.get(link.id);
       if (!visual) {
-        const geometry = new BufferGeometry();
-        geometry.setFromPoints([new Vector3(), new Vector3()]);
-        const material = new LineBasicMaterial({
-          color: link.beamColorHex,
-          transparent: true,
-          opacity: 0.8
-        });
-        const line = new Line(geometry, material);
-        line.name = `link-${link.id}`;
+        const group = new Group();
+        group.name = `link-${link.id}`;
         const metadata: SelectableMeta = {
           selectableType: "link",
           selectableId: link.id
         };
-        line.userData = {
-          ...line.userData,
+        group.userData = {
+          ...group.userData,
           ...metadata
         };
-        this.linkGroup.add(line);
 
-        visual = { line, pulseHz: link.pulseHz };
+        const beam = new Mesh(
+          new CylinderGeometry(link.beamRadius, link.beamRadius, 1, 18, 1, true),
+          new MeshStandardMaterial({
+            color: link.beamColorHex,
+            emissive: link.beamColorHex,
+            emissiveIntensity: 0.4,
+            transparent: true,
+            opacity: 0.52,
+            metalness: 0.2,
+            roughness: 0.24,
+            side: DoubleSide
+          })
+        );
+        beam.name = `link-beam-${link.id}`;
+
+        const packetRadius = Math.max(0.015, link.beamRadius * 0.78);
+        const packetA = new Mesh(
+          new SphereGeometry(packetRadius, 14, 10),
+          new MeshStandardMaterial({
+            color: link.beamColorHex,
+            emissive: link.beamColorHex,
+            emissiveIntensity: 1.1,
+            metalness: 0.08,
+            roughness: 0.2
+          })
+        );
+        const packetB = new Mesh(
+          new SphereGeometry(packetRadius, 14, 10),
+          new MeshStandardMaterial({
+            color: link.beamColorHex,
+            emissive: link.beamColorHex,
+            emissiveIntensity: 1.1,
+            metalness: 0.08,
+            roughness: 0.2
+          })
+        );
+
+        group.add(beam, packetA, packetB);
+        this.linkGroup.add(group);
+
+        visual = {
+          group,
+          beam,
+          packetA,
+          packetB,
+          flowHz: link.flowHz,
+          beamRadius: link.beamRadius,
+          from: new Vector3(),
+          to: new Vector3(),
+          phase: Math.random()
+        };
         this.linkMeshes.set(link.id, visual);
       } else {
-        visual.line.material.color = new Color(link.beamColorHex);
-        visual.pulseHz = link.pulseHz;
+        visual.flowHz = link.flowHz;
+        if (Math.abs(visual.beamRadius - link.beamRadius) > 0.0001) {
+          visual.beam.geometry.dispose();
+          visual.beam.geometry = new CylinderGeometry(link.beamRadius, link.beamRadius, 1, 18, 1, true);
+          visual.beamRadius = link.beamRadius;
+        }
       }
+
+      visual.beam.material.color = new Color(link.beamColorHex);
+      visual.beam.material.emissive = new Color(link.beamColorHex);
+      visual.packetA.material.color = new Color(link.beamColorHex);
+      visual.packetA.material.emissive = new Color(link.beamColorHex);
+      visual.packetB.material.color = new Color(link.beamColorHex);
+      visual.packetB.material.emissive = new Color(link.beamColorHex);
     }
   }
 
@@ -185,9 +286,31 @@ export class InfraSceneRenderer {
       if (!visual || !from || !to) {
         continue;
       }
-      visual.line.geometry.setFromPoints([from, to]);
-      visual.line.geometry.computeBoundingSphere();
+
+      visual.from.copy(from);
+      visual.to.copy(to);
+      this.updateBeamTransform(visual.beam, from, to);
     }
+  }
+
+  private updateBeamTransform(
+    beam: Mesh<CylinderGeometry, MeshStandardMaterial>,
+    from: Vector3,
+    to: Vector3
+  ): void {
+    this.tmpDir.copy(to).sub(from);
+    const length = this.tmpDir.length();
+    if (length < 0.001) {
+      beam.visible = false;
+      return;
+    }
+
+    beam.visible = true;
+    this.tmpDir.normalize();
+    beam.quaternion.setFromUnitVectors(InfraSceneRenderer.UP, this.tmpDir);
+    this.tmpMid.copy(from).add(to).multiplyScalar(0.5);
+    beam.position.copy(this.tmpMid);
+    beam.scale.set(1, length, 1);
   }
 
   private resolveNodePositions(nodes: RenderNodeView[]): Map<string, Vector3> {
@@ -206,25 +329,161 @@ export class InfraSceneRenderer {
     for (const node of anchored) {
       const position = this.markerAnchors.get(node.markerId);
       if (position) {
-        output.set(node.id, position.clone());
+        output.set(node.id, this.clampToBoundary(position));
       }
     }
 
-    const radius = 1.4;
+    const center = this.getPreferredCenter();
+    const radius = this.getPreferredRadius(center.x, center.z);
     const centerY = 1.35;
-    const centerZ = -1.5;
     const count = Math.max(floating.length, 1);
 
     floating.forEach((node, index) => {
       const angle = (index / count) * Math.PI * 2;
-      output.set(
-        node.id,
-        new Vector3(Math.cos(angle) * radius, centerY + 0.15 * Math.sin(index), centerZ + Math.sin(angle) * 0.6)
+      const candidate = new Vector3(
+        center.x + Math.cos(angle) * radius,
+        centerY + 0.15 * Math.sin(index),
+        center.z + Math.sin(angle) * radius * 0.7
       );
+      output.set(node.id, this.clampToBoundary(candidate));
     });
 
     return output;
   }
+
+  private getPreferredCenter(): { x: number; z: number } {
+    if (!this.boundaryPolygon || this.boundaryPolygon.length === 0) {
+      return { x: 0, z: -1.2 };
+    }
+
+    let sumX = 0;
+    let sumZ = 0;
+    for (const point of this.boundaryPolygon) {
+      sumX += point.x;
+      sumZ += point.z;
+    }
+
+    return {
+      x: sumX / this.boundaryPolygon.length,
+      z: sumZ / this.boundaryPolygon.length
+    };
+  }
+
+  private getPreferredRadius(centerX: number, centerZ: number): number {
+    if (!this.boundaryPolygon || this.boundaryPolygon.length < 3) {
+      return 0.9;
+    }
+
+    const distances = this.boundaryPolygon.map((point) =>
+      Math.hypot(point.x - centerX, point.z - centerZ)
+    );
+    const minRadius = Math.min(...distances);
+    return Math.max(0.35, minRadius * 0.62);
+  }
+
+  private clampToBoundary(position: Vector3): Vector3 {
+    if (!this.boundaryPolygon || this.boundaryPolygon.length < 3) {
+      return position.clone();
+    }
+
+    if (isInsidePolygon(position.x, position.z, this.boundaryPolygon)) {
+      return position.clone();
+    }
+
+    const closest = closestPointOnPolygon(position.x, position.z, this.boundaryPolygon);
+    return new Vector3(closest.x, position.y, closest.z);
+  }
+
+  private updateBoundaryVisual(): void {
+    if (this.boundaryLoop) {
+      this.boundaryLoop.geometry.dispose();
+      this.boundaryLoop.material.dispose();
+      this.boundaryLoop.removeFromParent();
+      this.boundaryLoop = null;
+    }
+
+    if (!this.boundaryPolygon || this.boundaryPolygon.length < 3) {
+      return;
+    }
+
+    const geometry = new BufferGeometry();
+    geometry.setFromPoints(this.boundaryPolygon.map((point) => new Vector3(point.x, 0.02, point.z)));
+    const material = new LineBasicMaterial({
+      color: "#4fd5ff",
+      transparent: true,
+      opacity: 0.45
+    });
+    this.boundaryLoop = new LineLoop(geometry, material);
+    this.boundaryLoop.name = "room-boundary";
+    this.root.add(this.boundaryLoop);
+  }
+}
+
+function fract(value: number): number {
+  return value - Math.floor(value);
+}
+
+function setPositionAt(target: Vector3, from: Vector3, to: Vector3, t: number): void {
+  target.set(
+    from.x + (to.x - from.x) * t,
+    from.y + (to.y - from.y) * t,
+    from.z + (to.z - from.z) * t
+  );
+}
+
+function isInsidePolygon(x: number, z: number, polygon: XrBoundaryPoint[]): boolean {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = polygon[i].x;
+    const zi = polygon[i].z;
+    const xj = polygon[j].x;
+    const zj = polygon[j].z;
+
+    const intersects = zi > z !== zj > z && x < ((xj - xi) * (z - zi)) / (zj - zi + 1e-8) + xi;
+    if (intersects) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+function closestPointOnPolygon(x: number, z: number, polygon: XrBoundaryPoint[]): XrBoundaryPoint {
+  let best: XrBoundaryPoint = { x: polygon[0].x, z: polygon[0].z };
+  let bestDistSq = Number.POSITIVE_INFINITY;
+
+  for (let i = 0; i < polygon.length; i++) {
+    const a = polygon[i];
+    const b = polygon[(i + 1) % polygon.length];
+    const projected = projectPointToSegment(x, z, a, b);
+    const distSq = (projected.x - x) * (projected.x - x) + (projected.z - z) * (projected.z - z);
+    if (distSq < bestDistSq) {
+      bestDistSq = distSq;
+      best = projected;
+    }
+  }
+
+  return best;
+}
+
+function projectPointToSegment(
+  x: number,
+  z: number,
+  a: XrBoundaryPoint,
+  b: XrBoundaryPoint
+): XrBoundaryPoint {
+  const abX = b.x - a.x;
+  const abZ = b.z - a.z;
+  const abLenSq = abX * abX + abZ * abZ;
+  if (abLenSq < 1e-8) {
+    return { x: a.x, z: a.z };
+  }
+
+  const t = ((x - a.x) * abX + (z - a.z) * abZ) / abLenSq;
+  const clampedT = Math.max(0, Math.min(1, t));
+  return {
+    x: a.x + abX * clampedT,
+    z: a.z + abZ * clampedT
+  };
 }
 
 function selectNodeColor(status: RenderNodeView["health"]): string {

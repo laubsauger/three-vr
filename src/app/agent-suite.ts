@@ -10,6 +10,8 @@ export interface DefaultAgentSuiteOptions {
   scene: Scene;
   camera: Camera;
   renderer: WebGLRenderer;
+  /** Raw KML text to render as a map overlay on detected markers. */
+  kmlText?: string;
 }
 
 export function createDefaultAgentSuite(options: DefaultAgentSuiteOptions): AgentSuite {
@@ -18,7 +20,8 @@ export function createDefaultAgentSuite(options: DefaultAgentSuiteOptions): Agen
     topology: createTopologyAgent(),
     telemetry: createTelemetryAgent(),
     rendering: createRenderingAgent({
-      scene: options.scene
+      scene: options.scene,
+      kmlText: options.kmlText,
     }),
     interaction: createInteractionAgent({
       scene: options.scene,
