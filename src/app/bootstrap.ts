@@ -580,6 +580,7 @@ export async function bootstrapApp(): Promise<void> {
   const xrPerformance = new PerformanceMonitor();
   const desktopPerformance = new PerformanceMonitor();
   let lastPerfEmitMs = 0;
+  let xrFrameCount = 0;
   const markerCalibration = new Map<number, MarkerCalibrationState>();
   let lockedSpawnAnchor: LockedSpawnAnchorState | null = null;
   let pendingXrSpawnAnchorResolve = false;
@@ -803,6 +804,8 @@ export async function bootstrapApp(): Promise<void> {
         requiredFeatures: [],
         optionalFeatures: baseOptionalFeatures
       });
+      xrFrameCount = 0;
+      xrOverlayLabel.textContent = "AR session active | XR frames 0";
       setXrCameraAccessLabel("standard");
       setArStartDiagnostic(
         "standard immersive-ar succeeded",
@@ -825,6 +828,8 @@ export async function bootstrapApp(): Promise<void> {
           requiredFeatures: ["camera-access"],
           optionalFeatures: baseOptionalFeatures
         });
+        xrFrameCount = 0;
+        xrOverlayLabel.textContent = "AR session active | XR frames 0";
         setXrCameraAccessLabel("required");
         setArStartDiagnostic(
           "camera-access required succeeded",
@@ -850,6 +855,8 @@ export async function bootstrapApp(): Promise<void> {
             requiredFeatures: [],
             optionalFeatures: [...baseOptionalFeatures, "camera-access"]
           });
+          xrFrameCount = 0;
+          xrOverlayLabel.textContent = "AR session active | XR frames 0";
           setXrCameraAccessLabel("fallback", compactReason);
           setArStartDiagnostic(
             "camera-access optional succeeded",
@@ -871,6 +878,8 @@ export async function bootstrapApp(): Promise<void> {
               requiredFeatures: [],
               optionalFeatures: [...baseOptionalFeatures, "camera-access"]
             });
+            xrFrameCount = 0;
+            xrOverlayLabel.textContent = "AR session active | XR frames 0";
             setXrCameraAccessLabel("fallback", "dom-overlay disabled");
             setArStartDiagnostic(
               "immersive-ar without dom-overlay succeeded",
@@ -1264,7 +1273,6 @@ export async function bootstrapApp(): Promise<void> {
       updateXrCompositionProbe(false);
       updateInSceneCameraPiP(false);
 
-      renderer.resetState();
       renderer.render(scene, camera);
       desktopLoopHandle = window.requestAnimationFrame(desktopLoop);
     }
@@ -1273,6 +1281,10 @@ export async function bootstrapApp(): Promise<void> {
   desktopLoopHandle = window.requestAnimationFrame(desktopLoop);
 
   xrRuntime.subscribeFrame((tick) => {
+    xrFrameCount += 1;
+    if (xrFrameCount <= 10 || xrFrameCount % 30 === 0) {
+      xrOverlayLabel.textContent = `AR session active | XR frames ${xrFrameCount}`;
+    }
     scene.background = null;
     setDomCameraPiPVisible(false);
     if (tick.deltaMs > 0) {
@@ -1304,7 +1316,6 @@ export async function bootstrapApp(): Promise<void> {
     }
     updateXrCompositionProbe(true);
     updateInSceneCameraPiP(true);
-    renderer.resetState();
     renderer.render(scene, camera);
     setState();
   });
