@@ -15,7 +15,7 @@ import {
 } from "three";
 
 import { XrRuntime } from "../xr-core";
-import type { XrRuntimeState } from "../contracts/xr";
+import type { XrReferenceSpaceType, XrRuntimeState } from "../contracts/xr";
 import { createAppEventBus } from "./event-bus";
 import type { AppErrorCode } from "../contracts/events";
 import type { TrackedMarker } from "../contracts/domain";
@@ -357,6 +357,10 @@ export async function bootstrapApp(): Promise<void> {
   cameraPiPCanvas.style.border = "1px solid rgba(88, 131, 144, 0.45)";
   cameraPiPCanvas.style.background = "#070c10";
   const cameraPiPCtx = cameraPiPCanvas.getContext("2d");
+  const inScenePiPCanvas = document.createElement("canvas");
+  inScenePiPCanvas.width = cameraPiPCanvas.width;
+  inScenePiPCanvas.height = cameraPiPCanvas.height;
+  const inScenePiPCtx = inScenePiPCanvas.getContext("2d");
 
   const selectionStatsLabel = document.createElement("div");
   selectionStatsLabel.style.fontSize = "12px";
@@ -611,7 +615,15 @@ export async function bootstrapApp(): Promise<void> {
   };
 
   const startArSessionWithCameraAccessProbe = async (): Promise<void> => {
+    const handheldReferenceSpaceOrder: XrReferenceSpaceType[] = [
+      "local",
+      "local-floor",
+      "bounded-floor",
+      "unbounded",
+      "viewer"
+    ];
     const baseOptionalFeatures = [
+      "local-floor",
       "dom-overlay",
       "hand-tracking",
       "anchors",
@@ -625,7 +637,8 @@ export async function bootstrapApp(): Promise<void> {
       await xrRuntime.start({
         mode: "immersive-ar",
         domOverlayRoot: wrapper,
-        requiredFeatures: ["local-floor", "camera-access"],
+        referenceSpaceOrder: handheldReferenceSpaceOrder,
+        requiredFeatures: ["camera-access"],
         optionalFeatures: baseOptionalFeatures
       });
       setXrCameraAccessLabel("required");
@@ -640,15 +653,31 @@ export async function bootstrapApp(): Promise<void> {
         await xrRuntime.start({
           mode: "immersive-ar",
           domOverlayRoot: wrapper,
-          requiredFeatures: ["local-floor"],
+          referenceSpaceOrder: handheldReferenceSpaceOrder,
+          requiredFeatures: [],
           optionalFeatures: [...baseOptionalFeatures, "camera-access"]
         });
         setXrCameraAccessLabel("fallback", compactReason);
         return;
       } catch (fallbackError) {
-        setXrCameraAccessLabel("unknown");
         const fallbackDetails = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
-        throw new Error(`camera-access probe failed (${primaryDetails}); fallback failed (${fallbackDetails})`);
+
+        try {
+          await xrRuntime.start({
+            mode: "immersive-ar",
+            referenceSpaceOrder: handheldReferenceSpaceOrder,
+            requiredFeatures: [],
+            optionalFeatures: [...baseOptionalFeatures, "camera-access"]
+          });
+          setXrCameraAccessLabel("fallback", "dom-overlay disabled");
+          return;
+        } catch (finalError) {
+          setXrCameraAccessLabel("unknown");
+          const finalDetails = finalError instanceof Error ? finalError.message : String(finalError);
+          throw new Error(
+            `camera-access probe failed (${primaryDetails}); fallback failed (${fallbackDetails}); final fallback failed (${finalDetails})`
+          );
+        }
       }
     }
   };
@@ -778,6 +807,11 @@ export async function bootstrapApp(): Promise<void> {
   const xrCameraPos = new Vector3();
   const xrCameraQuat = new Quaternion();
   const pipOffset = new Vector3(0.38, 0.23, -0.78);
+  const setDomCameraPiPVisible = (visible: boolean): void => {
+    const display = visible ? "" : "none";
+    cameraPiPLabel.style.display = display;
+    cameraPiPCanvas.style.display = display;
+  };
 
   const clearCameraPiPTexture = (): void => {
     if (!cameraPiPTexture) {
@@ -818,7 +852,7 @@ export async function bootstrapApp(): Promise<void> {
       return;
     }
 
-    cameraPiPTexture = new CanvasTexture(cameraPiPCanvas);
+    cameraPiPTexture = new CanvasTexture(inScenePiPCanvas);
     material.map = cameraPiPTexture;
     material.needsUpdate = true;
   };
@@ -842,7 +876,7 @@ export async function bootstrapApp(): Promise<void> {
     if (cameraPiPTexture) {
       cameraPiPTexture.needsUpdate = true;
     }
-    cameraPiPMesh.visible = desktopTrackingActive && videoReady;
+    cameraPiPMesh.visible = inXrMode && desktopTrackingActive && videoReady;
 
     if (inXrMode) {
       const xrCamera = renderer.xr.getCamera();
@@ -860,6 +894,7 @@ export async function bootstrapApp(): Promise<void> {
   const desktopLoop = (time: number): void => {
     if (xrRuntime.getState() !== "running") {
       scene.background = defaultBackground;
+      setDomCameraPiPVisible(true);
       const deltaMs = lastDesktopFrameTime === 0 ? 0 : time - lastDesktopFrameTime;
       lastDesktopFrameTime = time;
       if (deltaMs > 0) {
@@ -891,6 +926,7 @@ export async function bootstrapApp(): Promise<void> {
 
   xrRuntime.subscribeFrame((tick) => {
     scene.background = null;
+    setDomCameraPiPVisible(false);
     if (tick.deltaMs > 0) {
       xrPerformance.recordFrame(tick.time, tick.deltaMs);
     }
@@ -915,8 +951,8 @@ export async function bootstrapApp(): Promise<void> {
     events.emit("xr/frame", tick);
     const snapshot = xrPerformance.getSnapshot(tick.time);
     frameStats.textContent = `XR ${snapshot.fps.toFixed(1)} FPS | avg ${snapshot.avgFrameTimeMs.toFixed(2)}ms | p95 ${snapshot.p95FrameTimeMs.toFixed(2)}ms`;
-    if (cameraPiPCtx) {
-      drawCameraPiP(cameraPiPCtx, cameraPiPCanvas, switchableDetector, cameraPiPLabel);
+    if (inScenePiPCtx) {
+      drawCameraPiP(inScenePiPCtx, inScenePiPCanvas, switchableDetector, cameraPiPLabel);
     }
     updateInSceneCameraPiP(true);
     renderer.resetState();
@@ -1047,6 +1083,18 @@ export async function bootstrapApp(): Promise<void> {
   startButton.addEventListener("click", async () => {
     try {
       await refreshCameraPermissionState();
+
+      if (capabilities.immersiveAr !== "supported") {
+        emitError(
+          "XR_UNAVAILABLE",
+          "Immersive AR is not supported here. On Android Chrome, this requires an ARCore-compatible phone with Google Play Services for AR installed.",
+          true,
+          { mode: "immersive-ar" }
+        );
+        frameStats.textContent = "Immersive AR unavailable on this device/browser.";
+        setState();
+        return;
+      }
 
       if (!desktopTrackingActive) {
         desktopTrackingActive = true;
