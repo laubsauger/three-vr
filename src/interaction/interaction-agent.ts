@@ -178,6 +178,9 @@ export function createInteractionAgent(options: InteractionAgentOptions): Intera
 
   const pickFromRay = (origin: Vector3, direction: Vector3, maxDistance?: number): SelectableTarget | null => {
     raycaster.set(origin, direction.normalize());
+    raycaster.camera = options.renderer.xr.isPresenting
+      ? options.renderer.xr.getCamera()
+      : options.camera;
     const prevFar = raycaster.far;
     if (maxDistance != null) raycaster.far = maxDistance;
     const intersections = raycaster.intersectObjects(options.scene.children, true);

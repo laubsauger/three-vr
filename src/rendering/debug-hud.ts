@@ -95,6 +95,11 @@ export class DebugHud {
     this._mode = mode;
   }
 
+  setFollowLayout(offset: Vector3, scale: { x: number; y: number }): void {
+    this.followOffset.copy(offset);
+    this.sprite.scale.set(scale.x, scale.y, 1);
+  }
+
   beginDrag(point: Vector3, camera?: Camera): boolean {
     if (!camera || !this.containsPoint(point, camera)) {
       return false;

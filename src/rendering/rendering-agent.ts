@@ -49,6 +49,7 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
   let unsubscribePoint: (() => void) | null = null;
   let animationHandle = 0;
   let xrRunning = false;
+  const isCoarsePointer = window.matchMedia("(pointer: coarse)").matches;
   let hasLockedSpawnAnchor = false;
   let hudDragHand: "left" | "right" | null = null;
 
@@ -66,6 +67,20 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
   const getViewCamera = (): Camera => (
     xrRunning ? options.renderer.xr.getCamera() : options.camera
   );
+  const applyHudLayout = (): void => {
+    if (xrRunning && isCoarsePointer) {
+      debugHud.setFollowLayout(new Vector3(-0.07, -0.08, -0.42), {
+        x: 0.14,
+        y: 0.117
+      });
+      return;
+    }
+
+    debugHud.setFollowLayout(new Vector3(-0.18, -0.17, -0.5), {
+      x: 0.19,
+      y: 0.159
+    });
+  };
 
   // Debug HUD state
   const hudData: DebugHudData = {
@@ -102,6 +117,7 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
     debugHud.update(hudData, timeMs, viewCamera);
     animationHandle = window.requestAnimationFrame(animate);
   };
+  applyHudLayout();
 
   return {
     async init(context: IntegrationContext): Promise<void> {
@@ -182,6 +198,7 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
 
         unsubscribeXrState = context.events.on("xr/state", (payload) => {
           xrRunning = payload.state === "running";
+          applyHudLayout();
           hudData.xrState = payload.state;
           if (payload.state === "running") {
             renderer.setBoundaryPolygon(context.xrRuntime.getBoundaryPolygon());

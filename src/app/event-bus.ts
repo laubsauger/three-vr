@@ -27,7 +27,11 @@ export function createAppEventBus(): AppEventBus {
     }
 
     for (const handler of scopedHandlers) {
-      (handler as Handler<AppEventMap[TEventName]>)(payload);
+      try {
+        (handler as Handler<AppEventMap[TEventName]>)(payload);
+      } catch (error) {
+        console.error(`[event-bus] handler failed for ${String(eventName)}`, error);
+      }
     }
   };
 
