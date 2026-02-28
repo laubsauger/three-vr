@@ -546,6 +546,7 @@ export async function bootstrapApp(): Promise<void> {
   let pendingXrSpawnAnchorResolve = false;
   let cameraPermissionState: CameraPermissionState = "unknown";
   let cameraPermissionStatus: PermissionStatus | null = null;
+  let capabilities: XrCapabilities | null = null;
   const desktopCameraPos = new Vector3();
   const desktopCameraQuat = new Quaternion();
   const desktopCameraQuatInv = new Quaternion();
@@ -865,7 +866,6 @@ export async function bootstrapApp(): Promise<void> {
   const switchableDetector = new SwitchableDetector("camera");
   switchableDetector.camera.setXrGlContext(renderer.getContext());
   let xrEntryMode: XrEntryMode = "prelock";
-  let capabilities: XrCapabilities | null = null;
   const immersiveOverlaySnapshots: StyleSnapshot[] = [];
   const captureImmersiveOverlayStyles = (
     element: HTMLElement,
