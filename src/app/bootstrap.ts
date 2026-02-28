@@ -110,6 +110,51 @@ export async function bootstrapApp(): Promise<void> {
     button.style.letterSpacing = "0.02em";
   };
 
+  const xrOverlayRoot = document.createElement("div");
+  xrOverlayRoot.style.position = "fixed";
+  xrOverlayRoot.style.inset = "0";
+  xrOverlayRoot.style.display = "none";
+  xrOverlayRoot.style.pointerEvents = "none";
+  xrOverlayRoot.style.background = "transparent";
+  xrOverlayRoot.style.zIndex = "2000";
+
+  const xrOverlayBar = document.createElement("div");
+  xrOverlayBar.style.position = "absolute";
+  xrOverlayBar.style.top = "max(12px, env(safe-area-inset-top))";
+  xrOverlayBar.style.left = "12px";
+  xrOverlayBar.style.right = "12px";
+  xrOverlayBar.style.display = "flex";
+  xrOverlayBar.style.alignItems = "center";
+  xrOverlayBar.style.justifyContent = "space-between";
+  xrOverlayBar.style.gap = "12px";
+  xrOverlayBar.style.padding = "8px 10px";
+  xrOverlayBar.style.borderRadius = "12px";
+  xrOverlayBar.style.background = "rgba(5, 10, 13, 0.32)";
+  xrOverlayBar.style.border = "1px solid rgba(84, 126, 138, 0.2)";
+  xrOverlayBar.style.backdropFilter = "blur(8px)";
+  xrOverlayBar.style.pointerEvents = "auto";
+
+  const xrOverlayLabel = document.createElement("div");
+  xrOverlayLabel.textContent = "AR session active";
+  xrOverlayLabel.style.fontSize = "12px";
+  xrOverlayLabel.style.fontWeight = "700";
+  xrOverlayLabel.style.letterSpacing = "0.04em";
+  xrOverlayLabel.style.color = "#dbe5e8";
+
+  const xrOverlayStopButton = document.createElement("button");
+  xrOverlayStopButton.type = "button";
+  xrOverlayStopButton.textContent = "Stop AR";
+  applyControlButtonStyle(xrOverlayStopButton, {
+    border: "1px solid #7a2a2a",
+    background: "#5a1f1f"
+  });
+  xrOverlayStopButton.style.minWidth = "0";
+  xrOverlayStopButton.style.minHeight = isVrUi ? "52px" : "40px";
+  xrOverlayStopButton.style.padding = isVrUi ? "12px 18px" : "9px 12px";
+
+  xrOverlayBar.append(xrOverlayLabel, xrOverlayStopButton);
+  xrOverlayRoot.append(xrOverlayBar);
+
   const createInfoCard = (
     title: string,
     options: { collapsible?: boolean; collapsed?: boolean } = {}
@@ -277,6 +322,29 @@ export async function bootstrapApp(): Promise<void> {
   stateLabel.style.fontWeight = "700";
   stateLabel.textContent = toLabel("idle");
 
+  const environmentLabel = document.createElement("div");
+  environmentLabel.style.fontSize = "12px";
+  environmentLabel.style.opacity = "0.85";
+  environmentLabel.textContent = "Context: probing runtime environment";
+
+  const arStartPathLabel = document.createElement("div");
+  arStartPathLabel.style.fontSize = "12px";
+  arStartPathLabel.style.opacity = "0.9";
+  arStartPathLabel.textContent = "AR start path: idle";
+
+  const arStartDetailLabel = document.createElement("pre");
+  arStartDetailLabel.style.margin = "0";
+  arStartDetailLabel.style.padding = "8px";
+  arStartDetailLabel.style.background = "rgba(8, 14, 18, 0.62)";
+  arStartDetailLabel.style.border = "1px solid rgba(88, 131, 144, 0.28)";
+  arStartDetailLabel.style.borderRadius = "8px";
+  arStartDetailLabel.style.whiteSpace = "pre-wrap";
+  arStartDetailLabel.style.fontSize = "11px";
+  arStartDetailLabel.style.lineHeight = "1.35";
+  arStartDetailLabel.style.maxHeight = "120px";
+  arStartDetailLabel.style.overflow = "auto";
+  arStartDetailLabel.textContent = "No AR startup attempts yet.";
+
   const capabilitiesLabel = document.createElement("pre");
   capabilitiesLabel.style.margin = "0";
   capabilitiesLabel.style.padding = "8px";
@@ -395,7 +463,16 @@ export async function bootstrapApp(): Promise<void> {
   const cameraCard = createInfoCard("Camera", { collapsible: true });
   const telemetryCard = createInfoCard("Topology", { collapsible: true, collapsed: !isVrUi });
 
-  sessionCard.body.append(stateLabel, frameStats, trackingStats, trackingBackendLabel, selectionStatsLabel);
+  sessionCard.body.append(
+    stateLabel,
+    environmentLabel,
+    arStartPathLabel,
+    arStartDetailLabel,
+    frameStats,
+    trackingStats,
+    trackingBackendLabel,
+    selectionStatsLabel
+  );
   anchorCard.body.append(spawnAnchorLabel, calibrationLabel, calibrationPanel);
   cameraCard.body.append(cameraStatsLabel, cameraPermissionLabel, xrCameraAccessLabel, cameraPiPLabel, cameraPiPCanvas);
   telemetryCard.body.append(topologyStatsLabel, telemetryStatsLabel, capabilitiesLabel);
@@ -404,7 +481,7 @@ export async function bootstrapApp(): Promise<void> {
 
   toolbar.append(startButton, xrEntryModeToggle, stopButton, cameraTrackButton, mockToggle, stressToggle);
   wrapper.append(toolbar, filterBar, statusGrid, canvasHolder);
-  root.append(wrapper);
+  root.append(wrapper, xrOverlayRoot);
 
   const scene = new Scene();
   scene.background = new Color("#091419");
@@ -491,6 +568,29 @@ export async function bootstrapApp(): Promise<void> {
       timestampMs: performance.now(),
       details
     });
+  };
+
+  const setArStartDiagnostic = (
+    path: string,
+    detail: string,
+    options: { error?: boolean } = {}
+  ): void => {
+    arStartPathLabel.textContent = `AR start path: ${path}`;
+    arStartDetailLabel.textContent = detail;
+    arStartDetailLabel.style.color = options.error ? "#ffb0b0" : "#dbe5e8";
+    arStartDetailLabel.style.border = options.error
+      ? "1px solid rgba(186, 86, 86, 0.45)"
+      : "1px solid rgba(88, 131, 144, 0.28)";
+  };
+
+  const refreshEnvironmentLabel = (): void => {
+    const hasNavigatorXr = "xr" in navigator;
+    const secure = window.isSecureContext ? "yes" : "no";
+    const xr = hasNavigatorXr ? "yes" : "no";
+    const immersiveAr = capabilities?.immersiveAr ?? "unknown";
+    const immersiveVr = capabilities?.immersiveVr ?? "unknown";
+    environmentLabel.textContent =
+      `Context: secure=${secure} | navigator.xr=${xr} | immersiveAr=${immersiveAr} | immersiveVr=${immersiveVr}`;
   };
 
   const setCameraPermissionLabel = (state: CameraPermissionState): void => {
@@ -650,48 +750,79 @@ export async function bootstrapApp(): Promise<void> {
       "unbounded"
     ];
     setXrCameraAccessLabel("probing");
+    setArStartDiagnostic(
+      "trying standard immersive-ar",
+      `Attempt 1: requestSession("immersive-ar") with dom-overlay root + optional features [${baseOptionalFeatures.join(", ")}].`
+    );
 
     try {
       await xrRuntime.start({
         mode: "immersive-ar",
-        domOverlayRoot: wrapper,
+        domOverlayRoot: xrOverlayRoot,
         referenceSpaceOrder: handheldReferenceSpaceOrder,
         requiredFeatures: [],
         optionalFeatures: baseOptionalFeatures
       });
       setXrCameraAccessLabel("standard");
+      setArStartDiagnostic(
+        "standard immersive-ar succeeded",
+        "requestSession(\"immersive-ar\") succeeded without requesting raw camera-access."
+      );
       return;
     } catch (standardError) {
       const standardDetails = standardError instanceof Error ? standardError.message : String(standardError);
+      setArStartDiagnostic(
+        "standard immersive-ar failed",
+        `Attempt 1 failed: ${standardDetails}\nAttempt 2: retry with requiredFeatures=[camera-access].`,
+        { error: true }
+      );
 
       try {
         await xrRuntime.start({
           mode: "immersive-ar",
-          domOverlayRoot: wrapper,
+          domOverlayRoot: xrOverlayRoot,
           referenceSpaceOrder: handheldReferenceSpaceOrder,
           requiredFeatures: ["camera-access"],
           optionalFeatures: baseOptionalFeatures
         });
         setXrCameraAccessLabel("required");
+        setArStartDiagnostic(
+          "camera-access required succeeded",
+          `Attempt 1 failed: ${standardDetails}\nAttempt 2 succeeded with requiredFeatures=[camera-access].`
+        );
         return;
       } catch (primaryError) {
         const primaryDetails = primaryError instanceof Error ? primaryError.message : String(primaryError);
         const compactReason = /\bcamera-access\b/i.test(primaryDetails)
           ? "camera-access rejected"
           : "probe failed";
+        setArStartDiagnostic(
+          "camera-access required failed",
+          `Attempt 1 failed: ${standardDetails}\nAttempt 2 failed: ${primaryDetails}\nAttempt 3: retry with optionalFeatures += camera-access.`,
+          { error: true }
+        );
 
         try {
           await xrRuntime.start({
             mode: "immersive-ar",
-            domOverlayRoot: wrapper,
+            domOverlayRoot: xrOverlayRoot,
             referenceSpaceOrder: handheldReferenceSpaceOrder,
             requiredFeatures: [],
             optionalFeatures: [...baseOptionalFeatures, "camera-access"]
           });
           setXrCameraAccessLabel("fallback", compactReason);
+          setArStartDiagnostic(
+            "camera-access optional succeeded",
+            `Attempt 1 failed: ${standardDetails}\nAttempt 2 failed: ${primaryDetails}\nAttempt 3 succeeded with optional camera-access.`
+          );
           return;
         } catch (fallbackError) {
           const fallbackDetails = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
+          setArStartDiagnostic(
+            "dom-overlay retry pending",
+            `Attempt 1 failed: ${standardDetails}\nAttempt 2 failed: ${primaryDetails}\nAttempt 3 failed: ${fallbackDetails}\nAttempt 4: retry without dom-overlay.`,
+            { error: true }
+          );
 
           try {
             await xrRuntime.start({
@@ -701,10 +832,19 @@ export async function bootstrapApp(): Promise<void> {
               optionalFeatures: [...baseOptionalFeatures, "camera-access"]
             });
             setXrCameraAccessLabel("fallback", "dom-overlay disabled");
+            setArStartDiagnostic(
+              "immersive-ar without dom-overlay succeeded",
+              `Attempt 1 failed: ${standardDetails}\nAttempt 2 failed: ${primaryDetails}\nAttempt 3 failed: ${fallbackDetails}\nAttempt 4 succeeded after removing dom-overlay.`
+            );
             return;
           } catch (finalError) {
             setXrCameraAccessLabel("unknown");
             const finalDetails = finalError instanceof Error ? finalError.message : String(finalError);
+            setArStartDiagnostic(
+              "all immersive-ar startup paths failed",
+              `Attempt 1 failed: ${standardDetails}\nAttempt 2 failed: ${primaryDetails}\nAttempt 3 failed: ${fallbackDetails}\nAttempt 4 failed: ${finalDetails}`,
+              { error: true }
+            );
             throw new Error(
               `standard immersive-ar failed (${standardDetails}); camera-access probe failed (${primaryDetails}); fallback failed (${fallbackDetails}); final fallback failed (${finalDetails})`
             );
@@ -718,6 +858,7 @@ export async function bootstrapApp(): Promise<void> {
     frameStats.textContent = `[${payload.code}] ${payload.message}`;
   });
 
+  refreshEnvironmentLabel();
   await refreshCameraPermissionState();
 
   let desktopTrackingActive = true;
@@ -754,15 +895,7 @@ export async function bootstrapApp(): Promise<void> {
       "z-index": "999"
     });
     captureImmersiveOverlayStyles(toolbar, {
-      position: "absolute",
-      top: "max(12px, env(safe-area-inset-top))",
-      left: "12px",
-      right: "12px",
-      "z-index": "4",
-      padding: "8px",
-      background: "rgba(5, 10, 13, 0.32)",
-      border: "1px solid rgba(84, 126, 138, 0.2)",
-      "backdrop-filter": "blur(8px)"
+      display: "none"
     });
     captureImmersiveOverlayStyles(filterBar, {
       display: "none"
@@ -773,8 +906,10 @@ export async function bootstrapApp(): Promise<void> {
     captureImmersiveOverlayStyles(canvasHolder, {
       display: "none"
     });
+    xrOverlayRoot.style.display = "block";
   };
   const restoreImmersiveOverlayLayout = (): void => {
+    xrOverlayRoot.style.display = "none";
     while (immersiveOverlaySnapshots.length > 0) {
       const snapshot = immersiveOverlaySnapshots.pop();
       if (!snapshot) {
@@ -950,6 +1085,7 @@ export async function bootstrapApp(): Promise<void> {
     timestampMs: performance.now()
   });
   capabilitiesLabel.textContent = `Capabilities\n${JSON.stringify(capabilities, null, 2)}`;
+  refreshEnvironmentLabel();
   if (shouldUseNativeMobileAr()) {
     desktopTrackingActive = false;
     switchableDetector.camera.setInlineCameraEnabled(false);
@@ -964,6 +1100,10 @@ export async function bootstrapApp(): Promise<void> {
     spawnAnchorLabel.textContent = "Spawn anchor: resolved after entering AR";
     spawnAnchorLabel.style.color = "#7fd8cf";
     setXrCameraAccessLabel("standard", "pending");
+    setArStartDiagnostic(
+      "ready for native mobile AR",
+      "This device reports immersive-ar support. The app will not pre-open getUserMedia before XR; it will try standard immersive-ar first."
+    );
   }
 
   const setState = (): void => {
@@ -1288,6 +1428,10 @@ export async function bootstrapApp(): Promise<void> {
   startButton.addEventListener("click", async () => {
     try {
       if (shouldUseHandheldScreenFallback()) {
+        setArStartDiagnostic(
+          "screen-view fallback selected",
+          "immersive-ar is unavailable on this device/browser, so the app is entering the non-WebXR fullscreen screen mode."
+        );
         await handheldScreen.enter();
         setState();
         return;
@@ -1296,6 +1440,11 @@ export async function bootstrapApp(): Promise<void> {
       await refreshCameraPermissionState();
 
       if (capabilities.immersiveAr !== "supported") {
+        setArStartDiagnostic(
+          "immersive-ar unsupported",
+          "Capabilities say immersive-ar is unsupported, so requestSession(\"immersive-ar\") will not be attempted.",
+          { error: true }
+        );
         emitError(
           "XR_UNAVAILABLE",
           "Immersive AR is not supported here. On Android Chrome, this requires an ARCore-compatible phone with Google Play Services for AR installed.",
@@ -1343,6 +1492,11 @@ export async function bootstrapApp(): Promise<void> {
         xrEntryMode === "prelock" &&
         !lockedSpawnAnchor
       ) {
+        setArStartDiagnostic(
+          "blocked by prelock",
+          "This path still requires a stable marker lock before entering XR because it is not using the native mobile AR flow.",
+          { error: true }
+        );
         spawnAnchorLabel.textContent = "Spawn anchor: lock a stable marker before starting AR";
         spawnAnchorLabel.style.color = "#ffd27b";
         frameStats.textContent = "Waiting for a stable ArUco lock before starting AR.";
@@ -1377,6 +1531,7 @@ export async function bootstrapApp(): Promise<void> {
       setState();
     } catch (error) {
       const details = error instanceof Error ? error.message : String(error);
+      setArStartDiagnostic("start button handler failed", details, { error: true });
       emitError("XR_SESSION_START_FAILED", `Failed to start XR session: ${details}`, true, {
         mode: "immersive-ar"
       });
@@ -1404,6 +1559,12 @@ export async function bootstrapApp(): Promise<void> {
       const details = error instanceof Error ? error.message : String(error);
       emitError("XR_SESSION_STOP_FAILED", `Failed to stop XR session: ${details}`, true);
       setState();
+    }
+  });
+
+  xrOverlayStopButton.addEventListener("click", () => {
+    if (!stopButton.disabled) {
+      stopButton.click();
     }
   });
 
