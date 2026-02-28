@@ -110,6 +110,20 @@ export async function bootstrapApp(): Promise<void> {
     button.style.letterSpacing = "0.02em";
   };
 
+  const metricFontFamily =
+    "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, monospace";
+  const applyMetricLineStyle = (element: HTMLElement): void => {
+    element.style.fontFamily = metricFontFamily;
+    element.style.fontVariantNumeric = "tabular-nums";
+    element.style.lineHeight = "1.35";
+    element.style.minHeight = "1.35em";
+  };
+  const applyMetricBlockStyle = (element: HTMLElement, minLines: number): void => {
+    applyMetricLineStyle(element);
+    element.style.whiteSpace = "pre-wrap";
+    element.style.minHeight = `${(minLines * 1.35).toFixed(2)}em`;
+  };
+
   const xrOverlayRoot = document.createElement("div");
   xrOverlayRoot.style.position = "fixed";
   xrOverlayRoot.style.inset = "0";
@@ -443,6 +457,22 @@ export async function bootstrapApp(): Promise<void> {
   selectionStatsLabel.style.fontSize = "12px";
   selectionStatsLabel.style.opacity = "0.85";
   selectionStatsLabel.textContent = "Selection: none";
+  [
+    environmentLabel,
+    arStartPathLabel,
+    frameStats,
+    trackingStats,
+    trackingBackendLabel,
+    calibrationLabel,
+    spawnAnchorLabel,
+    topologyStatsLabel,
+    telemetryStatsLabel,
+    cameraStatsLabel,
+    cameraPermissionLabel,
+    xrCameraAccessLabel,
+    selectionStatsLabel
+  ].forEach(applyMetricLineStyle);
+  applyMetricBlockStyle(cameraPiPLabel, 4);
 
   const canvasHolder = document.createElement("div");
   canvasHolder.style.borderRadius = "16px";
@@ -1738,21 +1768,19 @@ function drawCameraPiP(
     : -1;
   const trackState = overlay.trackDiagnostics.muted ? "muted" : "live";
   const sourceDetails = overlay.captureBackend === "xr-camera"
-    ? " | xr raw"
-    : ` | track ${overlay.trackDiagnostics.readyState}/${trackState}` +
-      ` | evt ${overlay.trackDiagnostics.lastEvent}`;
+    ? "xr raw"
+    : `${overlay.trackDiagnostics.readyState}/${trackState}`;
 
   label.textContent =
-    `Camera PiP: ${overlay.width}x${overlay.height}` +
-    ` | src ${overlay.captureBackend}` +
-    sourceDetails +
-    (frameAgeMs >= 0 ? ` | frame ${frameAgeMs}ms` : "") +
-    ` | decoded ${overlay.debug.decodedMarkers}` +
-    ` | quads ${overlay.debug.candidateQuadCount}` +
-    ` | candidates ${overlay.debug.candidateCount}` +
-    ` | stable ${overlay.debug.stableCount}` +
-    ` | filtered ${overlay.debug.filteredCount}` +
-    ` | pose ${overlay.solvedPoseCount}/${overlay.poseAttemptCount}` +
+    `Camera PiP: ${overlay.width}x${overlay.height} | src ${overlay.captureBackend}\n` +
+    `Track: ${sourceDetails} | evt ${overlay.trackDiagnostics.lastEvent}` +
+    (frameAgeMs >= 0 ? ` | frame ${String(frameAgeMs).padStart(4, " ")}ms` : "") +
+    `\nDetect: decoded ${String(overlay.debug.decodedMarkers).padStart(3, " ")}` +
+    ` | quads ${String(overlay.debug.candidateQuadCount).padStart(3, " ")}` +
+    ` | cand ${String(overlay.debug.candidateCount).padStart(3, " ")}` +
+    `\nStable: ${String(overlay.debug.stableCount).padStart(3, " ")}` +
+    ` | filtered ${String(overlay.debug.filteredCount).padStart(3, " ")}` +
+    ` | pose ${String(overlay.solvedPoseCount).padStart(2, " ")}/${String(overlay.poseAttemptCount).padEnd(2, " ")}` +
     ` | pFail ${overlay.poseFailureReason}`;
 
   if (hasCapturedFrame && frameCanvas) {
