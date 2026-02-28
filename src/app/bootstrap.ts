@@ -15,13 +15,14 @@ import {
 } from "three";
 
 import { XrRuntime } from "../xr-core";
-import type { XrReferenceSpaceType, XrRuntimeState } from "../contracts/xr";
+import type { XrCapabilities, XrReferenceSpaceType, XrRuntimeState } from "../contracts/xr";
 import { createAppEventBus } from "./event-bus";
 import type { AppErrorCode } from "../contracts/events";
 import type { TrackedMarker } from "../contracts/domain";
 import { PerformanceMonitor } from "./performance-monitor";
 import { createDefaultAgentSuite } from "./agent-suite";
 import { createIntegrationCoordinator } from "./integration";
+import { HandheldScreenController } from "./handheld-screen";
 import {
   selectRenderGraphView,
   selectTopologyStats,
@@ -50,6 +51,11 @@ interface LockedSpawnAnchorState {
   relativeRotation: Quaternion;
 }
 
+interface StyleSnapshot {
+  element: HTMLElement;
+  previous: Map<string, string>;
+}
+
 type CameraPermissionState = PermissionState | "unsupported" | "unknown";
 type XrCameraAccessState = "unknown" | "probing" | "required" | "fallback";
 type XrEntryMode = "prelock" | "passthrough";
@@ -59,6 +65,8 @@ export async function bootstrapApp(): Promise<void> {
   if (!root) {
     throw new Error("Missing #app root element.");
   }
+  document.body.style.margin = "0";
+  root.style.minHeight = "100vh";
 
   const isVrUi = window.matchMedia("(pointer: coarse)").matches;
   const wrapper = document.createElement("div");
@@ -185,6 +193,7 @@ export async function bootstrapApp(): Promise<void> {
     border: "1px solid #7a2a2a",
     background: "#5a1f1f"
   });
+  stopButton.style.opacity = "0.5";
 
   const cameraTrackButton = document.createElement("button");
   cameraTrackButton.textContent = "Stop Camera Tracking";
@@ -393,7 +402,7 @@ export async function bootstrapApp(): Promise<void> {
 
   statusGrid.append(sessionCard.card, anchorCard.card, cameraCard.card, telemetryCard.card);
 
-  toolbar.append(startButton, stopButton, cameraTrackButton, mockToggle, xrEntryModeToggle, stressToggle);
+  toolbar.append(startButton, xrEntryModeToggle, stopButton, cameraTrackButton, mockToggle, stressToggle);
   wrapper.append(toolbar, filterBar, statusGrid, canvasHolder);
   root.append(wrapper);
 
@@ -449,6 +458,8 @@ export async function bootstrapApp(): Promise<void> {
   scene.add(ambient, keyLight, cameraPiPMesh);
 
   const xrRuntime = new XrRuntime(renderer);
+  const isQuestBrowser = /OculusBrowser|Meta Quest|Quest/i.test(navigator.userAgent);
+  const canUseHandheldScreenFallback = isVrUi && !isQuestBrowser;
   const events = createAppEventBus();
   const xrPerformance = new PerformanceMonitor();
   const desktopPerformance = new PerformanceMonitor();
@@ -555,6 +566,7 @@ export async function bootstrapApp(): Promise<void> {
     pendingXrSpawnAnchorResolve = false;
     spawnAnchorLabel.textContent = "Spawn anchor: waiting for stable marker";
     spawnAnchorLabel.style.color = "#dbe5e8";
+    refreshStartButtonState();
     events.emit("tracking/spawn-anchor", {
       markerId: null,
       position: null,
@@ -572,6 +584,7 @@ export async function bootstrapApp(): Promise<void> {
     lockedSpawnAnchor = state;
     spawnAnchorLabel.textContent = `Spawn anchor: locked to ID ${state.markerId}`;
     spawnAnchorLabel.style.color = "#7be2b1";
+    refreshStartButtonState();
     events.emit("tracking/spawn-anchor", {
       markerId: state.markerId,
       position: {
@@ -689,10 +702,155 @@ export async function bootstrapApp(): Promise<void> {
   await refreshCameraPermissionState();
 
   let desktopTrackingActive = true;
-  const isQuestBrowser = /OculusBrowser|Meta Quest|Quest/i.test(navigator.userAgent);
   const switchableDetector = new SwitchableDetector("camera");
   switchableDetector.camera.setXrGlContext(renderer.getContext());
   let xrEntryMode: XrEntryMode = "prelock";
+  let capabilities: XrCapabilities | null = null;
+  const immersiveOverlaySnapshots: StyleSnapshot[] = [];
+  const captureImmersiveOverlayStyles = (
+    element: HTMLElement,
+    nextStyles: Record<string, string>
+  ): void => {
+    const previous = new Map<string, string>();
+    for (const [property, value] of Object.entries(nextStyles)) {
+      previous.set(property, element.style.getPropertyValue(property));
+      element.style.setProperty(property, value);
+    }
+    immersiveOverlaySnapshots.push({ element, previous });
+  };
+  const applyImmersiveOverlayLayout = (): void => {
+    if (immersiveOverlaySnapshots.length > 0) {
+      return;
+    }
+
+    captureImmersiveOverlayStyles(wrapper, {
+      position: "fixed",
+      inset: "0",
+      "max-width": "none",
+      margin: "0",
+      padding: "0",
+      gap: "0",
+      "min-height": "100vh",
+      background: "transparent",
+      "z-index": "999"
+    });
+    captureImmersiveOverlayStyles(toolbar, {
+      position: "absolute",
+      top: "max(12px, env(safe-area-inset-top))",
+      left: "12px",
+      right: "12px",
+      "z-index": "4",
+      padding: "8px",
+      background: "rgba(5, 10, 13, 0.32)",
+      border: "1px solid rgba(84, 126, 138, 0.2)",
+      "backdrop-filter": "blur(8px)"
+    });
+    captureImmersiveOverlayStyles(filterBar, {
+      display: "none"
+    });
+    captureImmersiveOverlayStyles(statusGrid, {
+      display: "none"
+    });
+    captureImmersiveOverlayStyles(canvasHolder, {
+      display: "none"
+    });
+  };
+  const restoreImmersiveOverlayLayout = (): void => {
+    while (immersiveOverlaySnapshots.length > 0) {
+      const snapshot = immersiveOverlaySnapshots.pop();
+      if (!snapshot) {
+        continue;
+      }
+      for (const [property, previousValue] of snapshot.previous) {
+        if (previousValue) {
+          snapshot.element.style.setProperty(property, previousValue);
+        } else {
+          snapshot.element.style.removeProperty(property);
+        }
+      }
+    }
+  };
+  const resizeRendererToViewport = (): void => {
+    const nextWidth = window.innerWidth;
+    const nextHeight = handheldScreen.isActive()
+      ? Math.max(1, window.innerHeight)
+      : Math.max(1, Math.floor(window.innerHeight * 0.75));
+    camera.aspect = nextWidth / nextHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(nextWidth, nextHeight);
+    updateDesktopCameraFeed();
+  };
+  const handheldScreen = new HandheldScreenController({
+    camera,
+    renderer,
+    wrapper,
+    toolbar,
+    filterBar,
+    statusGrid,
+    canvasHolder,
+    onLayoutChange: resizeRendererToViewport
+  });
+  const shouldUseHandheldScreenFallback = (): boolean =>
+    canUseHandheldScreenFallback && capabilities?.immersiveAr !== "supported";
+
+  const refreshStartButtonState = (): void => {
+    const state = xrRuntime.getState();
+    let enabled = true;
+    let label = "Start AR Session";
+    let hint = "Start an immersive AR session.";
+
+    if (handheldScreen.isActive()) {
+      enabled = false;
+      label = "Screen View Active";
+      hint = "Use Stop Session to leave the fullscreen phone view.";
+    } else if (state === "requesting") {
+      enabled = false;
+      label = "Starting AR...";
+      hint = "XR session request is in progress.";
+    } else if (state === "running") {
+      enabled = false;
+      label = "AR Running";
+      hint = "Stop the current AR session before starting another one.";
+    } else if (!capabilities) {
+      enabled = false;
+      label = "Checking AR Support...";
+      hint = "Detecting WebXR capabilities.";
+    } else if (shouldUseHandheldScreenFallback()) {
+      label = "Enter Screen View";
+      hint = "WebXR AR is unavailable here. Use this phone as a fullscreen window into the 3D scene.";
+    } else if (capabilities.immersiveAr !== "supported") {
+      enabled = false;
+      label = "AR Unsupported";
+      hint = "This device/browser does not report immersive AR support.";
+    } else if (
+      switchableDetector.getMode() === "camera" &&
+      xrEntryMode === "prelock" &&
+      !desktopTrackingActive
+    ) {
+      enabled = false;
+      label = "Enable Camera Tracking";
+      hint = "Prelock mode needs live camera tracking before AR can start.";
+    } else if (
+      switchableDetector.getMode() === "camera" &&
+      xrEntryMode === "prelock" &&
+      !lockedSpawnAnchor
+    ) {
+      enabled = false;
+      label = "Lock Marker to Start AR";
+      hint = "Hold a stable marker in view until the spawn anchor locks.";
+    } else if (switchableDetector.getMode() === "camera" && xrEntryMode === "prelock") {
+      label = "Start AR (Marker Locked)";
+      hint = "Marker lock acquired. Ready to enter AR.";
+    }
+
+    startButton.disabled = !enabled;
+    startButton.textContent = label;
+    startButton.title = hint;
+    startButton.style.opacity = enabled ? "1" : "0.62";
+    startButton.style.cursor = enabled ? "pointer" : "not-allowed";
+    startButton.style.border = enabled ? "1px solid #1e5f73" : "1px solid #37515a";
+    startButton.style.background = enabled ? "#0f3b48" : "#243840";
+  };
 
   const applyXrEntryMode = async (mode: XrEntryMode): Promise<void> => {
     xrEntryMode = mode;
@@ -732,6 +890,8 @@ export async function bootstrapApp(): Promise<void> {
         cameraStatsLabel.textContent = "Camera: failed to restart";
       }
     }
+
+    refreshStartButtonState();
   };
 
   xrEntryModeToggle.addEventListener("click", () => {
@@ -760,7 +920,7 @@ export async function bootstrapApp(): Promise<void> {
     emitError("INTEGRATION_CONFLICT", `Failed to initialize integration agents: ${details}`, true);
   }
 
-  const capabilities = await xrRuntime.detectCapabilities();
+  capabilities = await xrRuntime.detectCapabilities();
   events.emit("xr/capabilities", {
     capabilities,
     timestampMs: performance.now()
@@ -773,9 +933,14 @@ export async function bootstrapApp(): Promise<void> {
       state,
       timestampMs: performance.now()
     });
-    stateLabel.textContent = toLabel(state);
-    startButton.disabled = state === "running" || state === "requesting";
-    stopButton.disabled = state !== "running";
+    stateLabel.textContent = handheldScreen.isActive() ? "Screen view: active" : toLabel(state);
+    refreshStartButtonState();
+    const stopEnabled = state === "running" || handheldScreen.isActive();
+    stopButton.disabled = !stopEnabled;
+    stopButton.style.opacity = stopEnabled ? "1" : "0.38";
+    stopButton.style.cursor = stopEnabled ? "pointer" : "not-allowed";
+    stopButton.style.border = stopEnabled ? "1px solid #7a2a2a" : "1px solid #4a3535";
+    stopButton.style.background = stopEnabled ? "#5a1f1f" : "#2f2525";
   };
 
   const emitPerformance = (mode: "xr" | "desktop", nowMs: number): void => {
@@ -901,6 +1066,7 @@ export async function bootstrapApp(): Promise<void> {
         desktopPerformance.recordFrame(time, deltaMs);
       }
       emitPerformance("desktop", time);
+      handheldScreen.updateCamera();
 
       if (desktopTrackingActive) {
         events.emit("xr/frame", {
@@ -1082,6 +1248,12 @@ export async function bootstrapApp(): Promise<void> {
 
   startButton.addEventListener("click", async () => {
     try {
+      if (shouldUseHandheldScreenFallback()) {
+        await handheldScreen.enter();
+        setState();
+        return;
+      }
+
       await refreshCameraPermissionState();
 
       if (capabilities.immersiveAr !== "supported") {
@@ -1142,6 +1314,7 @@ export async function bootstrapApp(): Promise<void> {
 
       pendingXrSpawnAnchorResolve = xrEntryMode === "prelock" && Boolean(lockedSpawnAnchor);
       await startArSessionWithCameraAccessProbe();
+      applyImmersiveOverlayLayout();
       scene.background = null;
       clearDesktopCameraFeed();
       if (desktopLoopHandle) {
@@ -1160,7 +1333,14 @@ export async function bootstrapApp(): Promise<void> {
 
   stopButton.addEventListener("click", async () => {
     try {
+      if (handheldScreen.isActive()) {
+        await handheldScreen.exit();
+        setState();
+        return;
+      }
+
       await xrRuntime.stop();
+      restoreImmersiveOverlayLayout();
       scene.background = defaultBackground;
       if (!desktopLoopHandle) {
         lastDesktopFrameTime = 0;
@@ -1209,6 +1389,7 @@ export async function bootstrapApp(): Promise<void> {
           ? "Tracking markers: 0 (mock active)"
           : "Tracking markers: 0 (starting camera...)";
     }
+    refreshStartButtonState();
   });
 
   mockToggle.addEventListener("click", () => {
@@ -1231,6 +1412,7 @@ export async function bootstrapApp(): Promise<void> {
       spawnAnchorLabel.style.color = lockedSpawnAnchor ? "#7be2b1" : "#dbe5e8";
       // Video background will be picked up by the desktop loop
     }
+    refreshStartButtonState();
   });
 
   let stressActive = true;
@@ -1258,16 +1440,11 @@ export async function bootstrapApp(): Promise<void> {
     applyStressState();
   });
 
-  window.addEventListener("resize", () => {
-    const nextWidth = window.innerWidth;
-    const nextHeight = Math.max(1, Math.floor(window.innerHeight * 0.75));
-    camera.aspect = nextWidth / nextHeight;
-    camera.updateProjectionMatrix();
-    renderer.setSize(nextWidth, nextHeight);
-    updateDesktopCameraFeed();
-  });
+  window.addEventListener("resize", resizeRendererToViewport);
 
   window.addEventListener("beforeunload", () => {
+    void handheldScreen.exit();
+    restoreImmersiveOverlayLayout();
     clearDesktopCameraFeed();
     clearCameraPiPTexture();
     if (cameraPermissionStatus) {
