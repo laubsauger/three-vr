@@ -18,6 +18,7 @@ import { XrRuntime } from "../xr-core";
 import type { XrRuntimeState } from "../contracts/xr";
 import { createAppEventBus } from "./event-bus";
 import type { AppErrorCode } from "../contracts/events";
+import type { TrackedMarker } from "../contracts/domain";
 import { PerformanceMonitor } from "./performance-monitor";
 import { createDefaultAgentSuite } from "./agent-suite";
 import { createIntegrationCoordinator } from "./integration";
@@ -41,7 +42,17 @@ interface MarkerCalibrationState {
   confidence: number;
 }
 
+interface LockedSpawnAnchorState {
+  markerId: number;
+  worldPosition: Vector3;
+  worldRotation: Quaternion;
+  relativePosition: Vector3;
+  relativeRotation: Quaternion;
+}
+
 type CameraPermissionState = PermissionState | "unsupported" | "unknown";
+type XrCameraAccessState = "unknown" | "probing" | "required" | "fallback";
+type XrEntryMode = "prelock" | "passthrough";
 
 export async function bootstrapApp(): Promise<void> {
   const root = document.querySelector<HTMLDivElement>("#app");
@@ -109,6 +120,13 @@ export async function bootstrapApp(): Promise<void> {
     border: "1px solid #4a4a6a",
     background: "#2a2a3f"
   });
+
+  const xrEntryModeToggle = document.createElement("button");
+  applyControlButtonStyle(xrEntryModeToggle, {
+    border: "1px solid #6a5a2a",
+    background: "#3f3520"
+  });
+  xrEntryModeToggle.style.minWidth = isVrUi ? "220px" : "0";
 
   const filterBar = document.createElement("div");
   filterBar.style.display = "flex";
@@ -199,6 +217,12 @@ export async function bootstrapApp(): Promise<void> {
   calibrationLabel.style.marginBottom = "2px";
   calibrationLabel.textContent = "Calibration: waiting for markers";
 
+  const spawnAnchorLabel = document.createElement("div");
+  spawnAnchorLabel.style.fontSize = "12px";
+  spawnAnchorLabel.style.opacity = "0.9";
+  spawnAnchorLabel.style.marginBottom = "2px";
+  spawnAnchorLabel.textContent = "Spawn anchor: waiting for stable marker";
+
   const calibrationPanel = document.createElement("pre");
   calibrationPanel.style.margin = "0";
   calibrationPanel.style.padding = "8px";
@@ -230,6 +254,11 @@ export async function bootstrapApp(): Promise<void> {
   cameraPermissionLabel.style.opacity = "0.85";
   cameraPermissionLabel.textContent = "Camera permission: unknown";
 
+  const xrCameraAccessLabel = document.createElement("div");
+  xrCameraAccessLabel.style.fontSize = "12px";
+  xrCameraAccessLabel.style.opacity = "0.85";
+  xrCameraAccessLabel.textContent = "XR camera-access: unknown";
+
   const cameraPiPLabel = document.createElement("div");
   cameraPiPLabel.style.fontSize = "12px";
   cameraPiPLabel.style.opacity = "0.85";
@@ -257,7 +286,7 @@ export async function bootstrapApp(): Promise<void> {
   canvasHolder.style.border = "1px solid rgba(92, 128, 138, 0.4)";
   canvasHolder.style.position = "relative";
 
-  toolbar.append(startButton, stopButton, cameraTrackButton, mockToggle, stressToggle);
+  toolbar.append(startButton, stopButton, cameraTrackButton, mockToggle, xrEntryModeToggle, stressToggle);
   wrapper.append(
     toolbar,
     filterBar,
@@ -266,11 +295,13 @@ export async function bootstrapApp(): Promise<void> {
     trackingStats,
     trackingBackendLabel,
     calibrationLabel,
+    spawnAnchorLabel,
     calibrationPanel,
     topologyStatsLabel,
     telemetryStatsLabel,
     cameraStatsLabel,
     cameraPermissionLabel,
+    xrCameraAccessLabel,
     cameraPiPLabel,
     cameraPiPCanvas,
     selectionStatsLabel,
@@ -336,8 +367,17 @@ export async function bootstrapApp(): Promise<void> {
   const desktopPerformance = new PerformanceMonitor();
   let lastPerfEmitMs = 0;
   const markerCalibration = new Map<number, MarkerCalibrationState>();
+  let lockedSpawnAnchor: LockedSpawnAnchorState | null = null;
+  let pendingXrSpawnAnchorResolve = false;
   let cameraPermissionState: CameraPermissionState = "unknown";
   let cameraPermissionStatus: PermissionStatus | null = null;
+  const desktopCameraPos = new Vector3();
+  const desktopCameraQuat = new Quaternion();
+  const desktopCameraQuatInv = new Quaternion();
+  const markerWorldPos = new Vector3();
+  const markerWorldQuat = new Quaternion();
+  const resolvedSpawnPos = new Vector3();
+  const resolvedSpawnQuat = new Quaternion();
 
   const emitError = (
     code: AppErrorCode,
@@ -367,6 +407,28 @@ export async function bootstrapApp(): Promise<void> {
       return;
     }
     cameraPermissionLabel.style.color = "#dbe5e8";
+  };
+
+  const setXrCameraAccessLabel = (state: XrCameraAccessState, detail = ""): void => {
+    if (state === "required") {
+      xrCameraAccessLabel.textContent = "XR camera-access: granted";
+      xrCameraAccessLabel.style.color = "#7be2b1";
+      return;
+    }
+    if (state === "fallback") {
+      xrCameraAccessLabel.textContent = detail
+        ? `XR camera-access: unavailable, using getUserMedia fallback (${detail})`
+        : "XR camera-access: unavailable, using getUserMedia fallback";
+      xrCameraAccessLabel.style.color = "#ffd27b";
+      return;
+    }
+    if (state === "probing") {
+      xrCameraAccessLabel.textContent = "XR camera-access: probing...";
+      xrCameraAccessLabel.style.color = "#dbe5e8";
+      return;
+    }
+    xrCameraAccessLabel.textContent = "XR camera-access: unknown";
+    xrCameraAccessLabel.style.color = "#dbe5e8";
   };
 
   const refreshCameraPermissionState = async (): Promise<CameraPermissionState> => {
@@ -401,13 +463,168 @@ export async function bootstrapApp(): Promise<void> {
     setCameraPermissionLabel(cameraPermissionStatus.state);
   };
 
+  const clearLockedSpawnAnchor = (timestampMs = performance.now()): void => {
+    lockedSpawnAnchor = null;
+    pendingXrSpawnAnchorResolve = false;
+    spawnAnchorLabel.textContent = "Spawn anchor: waiting for stable marker";
+    spawnAnchorLabel.style.color = "#dbe5e8";
+    events.emit("tracking/spawn-anchor", {
+      markerId: null,
+      position: null,
+      rotation: null,
+      source: "cleared",
+      timestampMs
+    });
+  };
+
+  const publishLockedSpawnAnchor = (
+    state: LockedSpawnAnchorState,
+    source: "desktop-prelock" | "xr-resolved",
+    timestampMs: number
+  ): void => {
+    lockedSpawnAnchor = state;
+    spawnAnchorLabel.textContent = `Spawn anchor: locked to ID ${state.markerId}`;
+    spawnAnchorLabel.style.color = "#7be2b1";
+    events.emit("tracking/spawn-anchor", {
+      markerId: state.markerId,
+      position: {
+        x: state.worldPosition.x,
+        y: state.worldPosition.y,
+        z: state.worldPosition.z
+      },
+      rotation: {
+        x: state.worldRotation.x,
+        y: state.worldRotation.y,
+        z: state.worldRotation.z,
+        w: state.worldRotation.w
+      },
+      source,
+      timestampMs
+    });
+  };
+
+  const updateLockedSpawnFromMarker = (marker: TrackedMarker, timestampMs: number): void => {
+    markerWorldPos.set(marker.pose.position.x, marker.pose.position.y, marker.pose.position.z);
+    markerWorldQuat.set(
+      marker.pose.rotation.x,
+      marker.pose.rotation.y,
+      marker.pose.rotation.z,
+      marker.pose.rotation.w
+    );
+
+    camera.getWorldPosition(desktopCameraPos);
+    camera.getWorldQuaternion(desktopCameraQuat);
+    desktopCameraQuatInv.copy(desktopCameraQuat).invert();
+
+    const nextState: LockedSpawnAnchorState = {
+      markerId: marker.markerId,
+      worldPosition: markerWorldPos.clone(),
+      worldRotation: markerWorldQuat.clone(),
+      relativePosition: markerWorldPos.clone().sub(desktopCameraPos).applyQuaternion(desktopCameraQuatInv),
+      relativeRotation: desktopCameraQuatInv.clone().multiply(markerWorldQuat)
+    };
+
+    publishLockedSpawnAnchor(nextState, "desktop-prelock", timestampMs);
+  };
+
+  const startArSessionWithCameraAccessProbe = async (): Promise<void> => {
+    const baseOptionalFeatures = [
+      "dom-overlay",
+      "hand-tracking",
+      "anchors",
+      "hit-test",
+      "bounded-floor",
+      "unbounded"
+    ];
+    setXrCameraAccessLabel("probing");
+
+    try {
+      await xrRuntime.start({
+        mode: "immersive-ar",
+        domOverlayRoot: wrapper,
+        requiredFeatures: ["local-floor", "camera-access"],
+        optionalFeatures: baseOptionalFeatures
+      });
+      setXrCameraAccessLabel("required");
+      return;
+    } catch (primaryError) {
+      const primaryDetails = primaryError instanceof Error ? primaryError.message : String(primaryError);
+      const compactReason = /\bcamera-access\b/i.test(primaryDetails)
+        ? "camera-access rejected"
+        : "probe failed";
+
+      try {
+        await xrRuntime.start({
+          mode: "immersive-ar",
+          domOverlayRoot: wrapper,
+          requiredFeatures: ["local-floor"],
+          optionalFeatures: [...baseOptionalFeatures, "camera-access"]
+        });
+        setXrCameraAccessLabel("fallback", compactReason);
+        return;
+      } catch (fallbackError) {
+        setXrCameraAccessLabel("unknown");
+        const fallbackDetails = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
+        throw new Error(`camera-access probe failed (${primaryDetails}); fallback failed (${fallbackDetails})`);
+      }
+    }
+  };
+
   events.on("app/error", (payload) => {
     frameStats.textContent = `[${payload.code}] ${payload.message}`;
   });
 
   await refreshCameraPermissionState();
 
+  let desktopTrackingActive = true;
   const switchableDetector = new SwitchableDetector("camera");
+  switchableDetector.camera.setXrGlContext(renderer.getContext());
+  let xrEntryMode: XrEntryMode = "prelock";
+
+  const applyXrEntryMode = async (mode: XrEntryMode): Promise<void> => {
+    xrEntryMode = mode;
+    xrEntryModeToggle.textContent =
+      mode === "prelock" ? "XR Mode: Prelock Anchor" : "XR Mode: Passthrough Hack";
+    xrEntryModeToggle.style.border =
+      mode === "prelock" ? "1px solid #6a5a2a" : "1px solid #2a6a63";
+    xrEntryModeToggle.style.background =
+      mode === "prelock" ? "#3f3520" : "#17443f";
+
+    switchableDetector.camera.setUserMediaPreference(
+      mode === "prelock" ? "default" : "quest-passthrough"
+    );
+
+    if (mode === "prelock") {
+      if (!lockedSpawnAnchor) {
+        spawnAnchorLabel.textContent = "Spawn anchor: waiting for stable marker";
+        spawnAnchorLabel.style.color = "#dbe5e8";
+      }
+    } else {
+      clearLockedSpawnAnchor();
+      spawnAnchorLabel.textContent = "Spawn anchor: live marker placement in XR";
+      spawnAnchorLabel.style.color = "#7fd8cf";
+    }
+
+    if (
+      desktopTrackingActive &&
+      switchableDetector.getMode() === "camera" &&
+      xrRuntime.getState() !== "running" &&
+      (switchableDetector.camera.getStatus() !== "idle" || mode === "passthrough")
+    ) {
+      try {
+        await switchableDetector.camera.restartUserMedia();
+        cameraStatsLabel.textContent =
+          `Camera: ready (${switchableDetector.camera.getOverlayData().captureBackend})`;
+      } catch {
+        cameraStatsLabel.textContent = "Camera: failed to restart";
+      }
+    }
+  };
+
+  xrEntryModeToggle.addEventListener("click", () => {
+    void applyXrEntryMode(xrEntryMode === "prelock" ? "passthrough" : "prelock");
+  });
+  await applyXrEntryMode("prelock");
 
   const integrationCoordinator = createIntegrationCoordinator(
     {
@@ -471,7 +688,6 @@ export async function bootstrapApp(): Promise<void> {
   let desktopLoopHandle = 0;
   // Keep tracking active by default so desktop and XR scanning start
   // without requiring a separate "Start Camera Tracking" click.
-  let desktopTrackingActive = true;
   const defaultBackground = scene.background;
   let videoTexture: VideoTexture | null = null;
   let cameraPiPTexture: CanvasTexture | null = null;
@@ -540,7 +756,7 @@ export async function bootstrapApp(): Promise<void> {
       video.videoWidth > 0 && video.videoHeight > 0
         ? video.videoWidth / video.videoHeight
         : switchableDetector.camera.getOverlayData().width /
-          Math.max(1, switchableDetector.camera.getOverlayData().height);
+        Math.max(1, switchableDetector.camera.getOverlayData().height);
 
     let planeWidth = viewWidth;
     let planeHeight = planeWidth / Math.max(videoAspect, 0.0001);
@@ -622,7 +838,7 @@ export async function bootstrapApp(): Promise<void> {
       }
       updateInSceneCameraPiP(false);
 
-
+      renderer.resetState();
       renderer.render(scene, camera);
       desktopLoopHandle = window.requestAnimationFrame(desktopLoop);
     }
@@ -635,6 +851,23 @@ export async function bootstrapApp(): Promise<void> {
       xrPerformance.recordFrame(tick.time, tick.deltaMs);
     }
     emitPerformance("xr", tick.time);
+    if (pendingXrSpawnAnchorResolve && lockedSpawnAnchor) {
+      const viewer = resolveViewerTransform(tick.frame, tick.referenceSpace);
+      if (viewer) {
+        resolvedSpawnPos.copy(lockedSpawnAnchor.relativePosition).applyQuaternion(viewer.rotation).add(viewer.position);
+        resolvedSpawnQuat.copy(viewer.rotation).multiply(lockedSpawnAnchor.relativeRotation);
+        publishLockedSpawnAnchor(
+          {
+            ...lockedSpawnAnchor,
+            worldPosition: resolvedSpawnPos.clone(),
+            worldRotation: resolvedSpawnQuat.clone()
+          },
+          "xr-resolved",
+          tick.time
+        );
+        pendingXrSpawnAnchorResolve = false;
+      }
+    }
     events.emit("xr/frame", tick);
     const snapshot = xrPerformance.getSnapshot(tick.time);
     frameStats.textContent = `XR ${snapshot.fps.toFixed(1)} FPS | avg ${snapshot.avgFrameTimeMs.toFixed(2)}ms | p95 ${snapshot.p95FrameTimeMs.toFixed(2)}ms`;
@@ -642,6 +875,7 @@ export async function bootstrapApp(): Promise<void> {
       drawCameraPiP(cameraPiPCtx, cameraPiPCanvas, switchableDetector, cameraPiPLabel);
     }
     updateInSceneCameraPiP(true);
+    renderer.resetState();
     renderer.render(scene, camera);
     setState();
   });
@@ -690,6 +924,34 @@ export async function bootstrapApp(): Promise<void> {
     }
 
     renderCalibrationPanel(calibrationLabel, calibrationPanel, markerCalibration, now);
+
+    if (
+      !desktopTrackingActive ||
+      xrEntryMode !== "prelock" ||
+      switchableDetector.getMode() !== "camera" ||
+      xrRuntime.getState() === "running"
+    ) {
+      return;
+    }
+
+    let bestStableMarker: TrackedMarker | null = null;
+    for (const marker of payload.markers) {
+      const state = markerCalibration.get(marker.markerId);
+      if (!state) {
+        continue;
+      }
+      const lockMs = now - state.firstSeenMs;
+      if (state.confidence < 0.72 || lockMs < 1200) {
+        continue;
+      }
+      if (!bestStableMarker || marker.pose.confidence > bestStableMarker.pose.confidence) {
+        bestStableMarker = marker;
+      }
+    }
+
+    if (bestStableMarker) {
+      updateLockedSpawnFromMarker(bestStableMarker, now);
+    }
   });
 
   events.on("tracking/status", (payload) => {
@@ -697,7 +959,8 @@ export async function bootstrapApp(): Promise<void> {
       `Tracking backend: ${payload.backend} (${payload.detectorStatus})`;
 
     if (payload.backend === "camera-worker") {
-      cameraStatsLabel.textContent = `Camera: ${payload.detectorStatus}`;
+      const overlay = switchableDetector.camera.getOverlayData();
+      cameraStatsLabel.textContent = `Camera: ${payload.detectorStatus} (${overlay.captureBackend})`;
       if (payload.detectorStatus === "ready" && cameraPermissionState === "unknown") {
         setCameraPermissionLabel("granted");
       }
@@ -753,7 +1016,10 @@ export async function bootstrapApp(): Promise<void> {
         // Keep XR start independent from detector startup.
         // Detector startup happens from tracking frames, which matches
         // the known-good behavior in af3014 and avoids pre-start lockups.
-        cameraStatsLabel.textContent = "Camera: waiting for XR detector start";
+        cameraStatsLabel.textContent =
+          xrEntryMode === "prelock"
+            ? "Camera: waiting for XR detector start"
+            : "Camera: priming Quest passthrough workaround";
       }
 
       if (cameraPermissionState === "denied") {
@@ -764,10 +1030,26 @@ export async function bootstrapApp(): Promise<void> {
         );
       }
 
-      await xrRuntime.start({
-        mode: "immersive-ar",
-        domOverlayRoot: wrapper
-      });
+      if (switchableDetector.getMode() === "camera" && xrEntryMode === "prelock" && !lockedSpawnAnchor) {
+        spawnAnchorLabel.textContent = "Spawn anchor: lock a stable marker before starting AR";
+        spawnAnchorLabel.style.color = "#ffd27b";
+        frameStats.textContent = "Waiting for a stable ArUco lock before starting AR.";
+        setState();
+        return;
+      }
+
+      if (switchableDetector.getMode() === "camera" && xrEntryMode === "passthrough") {
+        try {
+          await switchableDetector.camera.restartUserMedia();
+          cameraStatsLabel.textContent =
+            `Camera: ready (${switchableDetector.camera.getOverlayData().captureBackend})`;
+        } catch {
+          cameraStatsLabel.textContent = "Camera: passthrough workaround failed";
+        }
+      }
+
+      pendingXrSpawnAnchorResolve = xrEntryMode === "prelock" && Boolean(lockedSpawnAnchor);
+      await startArSessionWithCameraAccessProbe();
       clearDesktopCameraFeed();
       if (desktopLoopHandle) {
         window.cancelAnimationFrame(desktopLoopHandle);
@@ -801,6 +1083,7 @@ export async function bootstrapApp(): Promise<void> {
   cameraTrackButton.addEventListener("click", async () => {
     if (desktopTrackingActive) {
       desktopTrackingActive = false;
+      clearLockedSpawnAnchor();
       cameraTrackButton.textContent = "Start Camera Tracking";
       cameraTrackButton.style.border = "1px solid #1e7353";
       cameraTrackButton.style.background = "#0f4830";
@@ -814,7 +1097,8 @@ export async function bootstrapApp(): Promise<void> {
       if (switchableDetector.getMode() === "camera") {
         try {
           await switchableDetector.camera.ensureStarted();
-          cameraStatsLabel.textContent = "Camera: ready";
+          cameraStatsLabel.textContent =
+            `Camera: ready (${switchableDetector.camera.getOverlayData().captureBackend})`;
           if (cameraPermissionState !== "denied") {
             setCameraPermissionLabel("granted");
           }
@@ -835,6 +1119,7 @@ export async function bootstrapApp(): Promise<void> {
 
   mockToggle.addEventListener("click", () => {
     if (switchableDetector.getMode() === "camera") {
+      clearLockedSpawnAnchor();
       switchableDetector.setMode("mock");
       mockToggle.textContent = "Mode: Mock";
       mockToggle.style.border = "1px solid #6a5a2a";
@@ -846,6 +1131,10 @@ export async function bootstrapApp(): Promise<void> {
       mockToggle.textContent = "Mode: Camera";
       mockToggle.style.border = "1px solid #4a4a6a";
       mockToggle.style.background = "#2a2a3f";
+      spawnAnchorLabel.textContent = lockedSpawnAnchor
+        ? `Spawn anchor: locked to ID ${lockedSpawnAnchor.markerId}`
+        : "Spawn anchor: waiting for stable marker";
+      spawnAnchorLabel.style.color = lockedSpawnAnchor ? "#7be2b1" : "#dbe5e8";
       // Video background will be picked up by the desktop loop
     }
   });
@@ -945,16 +1234,30 @@ function drawCameraPiP(
   }
 
   const video = detector.camera.getVideo();
+  const frameCanvas = detector.camera.getFrameCanvas();
   const overlay = detector.camera.getOverlayData();
+  const hasCapturedFrame = Boolean(frameCanvas && overlay.frameCapturedAtMs > 0);
 
-  if (!video || video.readyState < 2) {
+  if (!hasCapturedFrame && (!video || video.readyState < 2)) {
     label.textContent = "Camera PiP: waiting for camera frame";
     drawPiPText(ctx, canvas, "Waiting for Camera...");
     return;
   }
 
+  const frameAgeMs = overlay.frameCapturedAtMs > 0
+    ? Math.max(0, Math.round(performance.now() - overlay.frameCapturedAtMs))
+    : -1;
+  const trackState = overlay.trackDiagnostics.muted ? "muted" : "live";
+  const sourceDetails = overlay.captureBackend === "xr-camera"
+    ? " | xr raw"
+    : ` | track ${overlay.trackDiagnostics.readyState}/${trackState}` +
+      ` | evt ${overlay.trackDiagnostics.lastEvent}`;
+
   label.textContent =
     `Camera PiP: ${overlay.width}x${overlay.height}` +
+    ` | src ${overlay.captureBackend}` +
+    sourceDetails +
+    (frameAgeMs >= 0 ? ` | frame ${frameAgeMs}ms` : "") +
     ` | decoded ${overlay.debug.decodedMarkers}` +
     ` | quads ${overlay.debug.candidateQuadCount}` +
     ` | candidates ${overlay.debug.candidateCount}` +
@@ -963,7 +1266,11 @@ function drawCameraPiP(
     ` | pose ${overlay.solvedPoseCount}/${overlay.poseAttemptCount}` +
     ` | pFail ${overlay.poseFailureReason}`;
 
-  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  if (hasCapturedFrame && frameCanvas) {
+    ctx.drawImage(frameCanvas, 0, 0, canvas.width, canvas.height);
+  } else if (video) {
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  }
   const sx = canvas.width / overlay.width;
   const sy = canvas.height / overlay.height;
 
@@ -1010,4 +1317,39 @@ function drawPiPText(
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.fillText(text, canvas.width / 2, canvas.height / 2);
+}
+
+function resolveViewerTransform(
+  frame: unknown,
+  referenceSpace: unknown
+): { position: Vector3; rotation: Quaternion } | null {
+  if (!frame || typeof frame !== "object") {
+    return null;
+  }
+
+  const frameLike = frame as {
+    getViewerPose?: (refSpace: unknown) => {
+      transform?: {
+        position?: { x: number; y: number; z: number };
+        orientation?: { x: number; y: number; z: number; w: number };
+      };
+    } | null;
+  };
+
+  if (typeof frameLike.getViewerPose !== "function") {
+    return null;
+  }
+
+  const pose = frameLike.getViewerPose(referenceSpace);
+  const transform = pose?.transform;
+  const position = transform?.position;
+  const orientation = transform?.orientation;
+  if (!position || !orientation) {
+    return null;
+  }
+
+  return {
+    position: new Vector3(position.x, position.y, position.z),
+    rotation: new Quaternion(orientation.x, orientation.y, orientation.z, orientation.w)
+  };
 }

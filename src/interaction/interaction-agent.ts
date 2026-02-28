@@ -18,6 +18,12 @@ import { HandTracker } from "./hand-tracking";
 
 type SelectableKind = "node" | "link";
 type VisualState = "none" | "hover" | "selected";
+interface MaterialBaseline {
+  colorHex?: number;
+  emissiveHex?: number;
+  emissiveIntensity?: number;
+  opacity?: number;
+}
 
 interface SelectableTarget {
   kind: SelectableKind;
@@ -51,7 +57,9 @@ interface InputSourceEventLike {
 }
 
 /** Proximity radius for hover detection around the index fingertip. */
-const HOVER_PROXIMITY_RADIUS = 0.25;
+const HOVER_PROXIMITY_RADIUS = 0.18;
+/** Direct intersection radius for any tracked hand joint. */
+const HAND_INTERSECTION_RADIUS = 0.1;
 /** Max distance for finger-pointing ray hover. */
 const HOVER_RAY_MAX_DISTANCE = 3.0;
 
@@ -97,7 +105,7 @@ export function createInteractionAgent(options: InteractionAgentOptions): Intera
   let unsubscribePoint: (() => void) | null = null;
   let activeSession: SessionLike | null = null;
 
-  const defaultColors = new WeakMap<Material, number>();
+  const materialBaselines = new WeakMap<Material, MaterialBaseline>();
   const handTracker = new HandTracker();
 
   // ---- Visual state management ----
@@ -109,25 +117,20 @@ export function createInteractionAgent(options: InteractionAgentOptions): Intera
   };
 
   const applyVisualState = (object: Object3D, state: VisualState): void => {
-    const apply = (mat: Material) => applyMaterialState(mat, state, defaultColors);
-
-    if (object instanceof Mesh) {
-      const material = object.material;
+    object.traverse((entry) => {
+      const apply = (mat: Material) => applyMaterialState(mat, state, materialBaselines);
+      const material = (entry as Object3D & { material?: Material | Material[] }).material;
+      if (!material) {
+        return;
+      }
       if (Array.isArray(material)) {
-        for (const item of material) apply(item);
+        for (const item of material) {
+          apply(item);
+        }
       } else {
         apply(material);
       }
-      return;
-    }
-
-    const maybeMaterial = (object as Object3D & { material?: Material | Material[] }).material;
-    if (!maybeMaterial) return;
-    if (Array.isArray(maybeMaterial)) {
-      for (const item of maybeMaterial) apply(item);
-    } else {
-      apply(maybeMaterial);
-    }
+    });
   };
 
   const refreshVisual = (object: Object3D): void => {
@@ -137,7 +140,7 @@ export function createInteractionAgent(options: InteractionAgentOptions): Intera
   // ---- Hover ----
 
   const updateHover = (context: IntegrationContext, next: SelectableTarget | null): void => {
-    if (next?.object === hoveredObject) return;
+    if ((next?.object ?? null) === hoveredObject) return;
 
     const prevObj = hoveredObject;
     hoveredObject = next?.object ?? null;
@@ -182,28 +185,54 @@ export function createInteractionAgent(options: InteractionAgentOptions): Intera
     return pickFirstSelectable(intersections.map((entry) => entry.object));
   };
 
-  const pickFromProximity = (point: Vector3, radius: number): SelectableTarget | null => {
-    let bestTarget: SelectableTarget | null = null;
+  const pickFromProximity = (point: Vector3, radius: number): (SelectableTarget & { distSq: number }) | null => {
+    let bestTarget: (SelectableTarget & { distSq: number }) | null = null;
     let bestDistSq = radius * radius;
 
     options.scene.traverse((object) => {
-      const selectableType = readSelectableType(object);
-      const selectableId = readSelectableId(object);
-      if (!selectableType || !selectableId) return;
+      if (!(object instanceof Mesh)) return;
+
+      const target = resolveSelectableTarget(object);
+      if (!target) return;
 
       object.getWorldPosition(tmpWorldPos);
       const distSq = tmpWorldPos.distanceToSquared(point);
       if (distSq < bestDistSq) {
         bestDistSq = distSq;
-        bestTarget = { kind: selectableType, id: selectableId, object };
+        bestTarget = { ...target, distSq };
       }
     });
 
     return bestTarget;
   };
 
+  const pickDirectHoverFromHand = (joints: Array<{ name: string; position: { x: number; y: number; z: number } }>): SelectableTarget | null => {
+    let bestHit: (SelectableTarget & { distSq: number }) | null = null;
+
+    for (const joint of joints) {
+      fingerTipPos.set(joint.position.x, joint.position.y, joint.position.z);
+      const hit = pickFromProximity(fingerTipPos, HAND_INTERSECTION_RADIUS);
+      if (hit && (!bestHit || hit.distSq < bestHit.distSq)) {
+        bestHit = hit;
+      }
+    }
+
+    if (!bestHit) {
+      return null;
+    }
+
+    return {
+      kind: bestHit.kind,
+      id: bestHit.id,
+      object: bestHit.object,
+    };
+  };
+
   /** Hover check using right hand: proximity from index tip, then finger pointing ray. */
   const pickHoverFromHand = (joints: Array<{ name: string; position: { x: number; y: number; z: number } }>): SelectableTarget | null => {
+    const directTarget = pickDirectHoverFromHand(joints);
+    if (directTarget) return directTarget;
+
     const indexTip = joints.find((j) => j.name === "index-finger-tip");
     if (!indexTip) return null;
 
@@ -211,7 +240,13 @@ export function createInteractionAgent(options: InteractionAgentOptions): Intera
 
     // Near: proximity from fingertip
     const nearTarget = pickFromProximity(fingerTipPos, HOVER_PROXIMITY_RADIUS);
-    if (nearTarget) return nearTarget;
+    if (nearTarget) {
+      return {
+        kind: nearTarget.kind,
+        id: nearTarget.id,
+        object: nearTarget.object,
+      };
+    }
 
     // Far: ray along finger direction (distal → tip)
     const indexDistal = joints.find((j) => j.name === "index-finger-phalanx-distal");
@@ -363,14 +398,23 @@ export function createInteractionAgent(options: InteractionAgentOptions): Intera
           });
         }
 
-        // Per-frame hover from right hand index finger
-        const rightHand = hands.find((h) => h.hand === "right");
-        if (rightHand) {
-          const target = pickHoverFromHand(rightHand.joints);
-          updateHover(context, target);
-        } else {
-          if (hoveredObject) updateHover(context, null);
+        let target: SelectableTarget | null = null;
+
+        for (const hand of hands) {
+          target = pickDirectHoverFromHand(hand.joints);
+          if (target) {
+            break;
+          }
         }
+
+        if (!target) {
+          const rightHand = hands.find((h) => h.hand === "right");
+          if (rightHand) {
+            target = pickHoverFromHand(rightHand.joints);
+          }
+        }
+
+        updateHover(context, target);
       });
 
       // Right-hand pinch → select current hover target (or deselect)
@@ -469,15 +513,23 @@ function asInputSourceEvent(value: unknown): InputSourceEventLike | null {
 
 function pickFirstSelectable(intersections: Object3D[]): SelectableTarget | null {
   for (const object of intersections) {
-    let cursor: Object3D | null = object;
-    while (cursor) {
-      const selectableType = readSelectableType(cursor);
-      const selectableId = readSelectableId(cursor);
-      if (selectableType && selectableId) {
-        return { kind: selectableType, id: selectableId, object: cursor };
-      }
-      cursor = cursor.parent;
+    const target = resolveSelectableTarget(object);
+    if (target) {
+      return target;
     }
+  }
+  return null;
+}
+
+function resolveSelectableTarget(object: Object3D): SelectableTarget | null {
+  let cursor: Object3D | null = object;
+  while (cursor) {
+    const selectableType = readSelectableType(cursor);
+    const selectableId = readSelectableId(cursor);
+    if (selectableType && selectableId) {
+      return { kind: selectableType, id: selectableId, object: cursor };
+    }
+    cursor = cursor.parent;
   }
   return null;
 }
@@ -497,11 +549,11 @@ function readSelectableId(object: Object3D): string | null {
 function applyMaterialState(
   material: Material,
   state: VisualState,
-  defaultColors: WeakMap<Material, number>
+  baselines: WeakMap<Material, MaterialBaseline>
 ): void {
   if (material instanceof MeshStandardMaterial) {
-    if (!defaultColors.has(material)) {
-      defaultColors.set(material, material.color.getHex());
+    if (!baselines.has(material)) {
+      baselines.set(material, readMaterialBaseline(material));
     }
     if (state === "selected") {
       material.emissive.setHex(0x2c6b8b);
@@ -510,19 +562,23 @@ function applyMaterialState(
       material.emissive.setHex(0x1a5566);
       material.emissiveIntensity = 0.45;
     } else {
-      material.emissive.setHex(0x000000);
-      material.emissiveIntensity = 0;
-      const original = defaultColors.get(material);
-      if (typeof original === "number") {
-        material.color.setHex(original);
+      const baseline = readMaterialBaseline(material, baselines.get(material));
+      if (baseline?.emissiveHex != null) {
+        material.emissive.setHex(baseline.emissiveHex);
+      }
+      if (baseline?.emissiveIntensity != null) {
+        material.emissiveIntensity = baseline.emissiveIntensity;
+      }
+      if (baseline?.colorHex != null) {
+        material.color.setHex(baseline.colorHex);
       }
     }
     return;
   }
 
   if (material instanceof LineBasicMaterial) {
-    if (!defaultColors.has(material)) {
-      defaultColors.set(material, material.color.getHex());
+    if (!baselines.has(material)) {
+      baselines.set(material, readMaterialBaseline(material));
     }
     if (state === "selected") {
       material.color.setHex(0x72e1ff);
@@ -531,11 +587,41 @@ function applyMaterialState(
       material.color.setHex(0x55ccee);
       material.opacity = 0.9;
     } else {
-      const original = defaultColors.get(material);
-      if (typeof original === "number") {
-        material.color.setHex(original);
+      const baseline = readMaterialBaseline(material, baselines.get(material));
+      if (baseline?.colorHex != null) {
+        material.color.setHex(baseline.colorHex);
       }
-      material.opacity = 0.8;
+      if (baseline?.opacity != null) {
+        material.opacity = baseline.opacity;
+      }
     }
   }
+}
+
+function readMaterialBaseline(material: Material, fallback?: MaterialBaseline): MaterialBaseline {
+  const userDataBase = (material.userData as { interactionBase?: MaterialBaseline }).interactionBase;
+  if (userDataBase) {
+    return userDataBase;
+  }
+
+  if (fallback) {
+    return fallback;
+  }
+
+  if (material instanceof MeshStandardMaterial) {
+    return {
+      colorHex: material.color.getHex(),
+      emissiveHex: material.emissive.getHex(),
+      emissiveIntensity: material.emissiveIntensity,
+    };
+  }
+
+  if (material instanceof LineBasicMaterial) {
+    return {
+      colorHex: material.color.getHex(),
+      opacity: material.opacity,
+    };
+  }
+
+  return {};
 }

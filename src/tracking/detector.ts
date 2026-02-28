@@ -34,6 +34,29 @@ interface WorkerDebugInfo {
   rejectedLowConfidence: number;
 }
 
+type CaptureBackend = "video" | "imagecapture" | "xr-camera";
+type TrackEventReason = "none" | "mute" | "unmute" | "ended" | "grab-failed";
+type UserMediaPreference = "default" | "quest-passthrough";
+
+interface TrackDiagnostics {
+  readyState: string;
+  enabled: boolean;
+  muted: boolean;
+  label: string;
+  lastEvent: TrackEventReason;
+}
+
+interface XrGlBindingLike {
+  getCameraImage(camera: unknown): WebGLTexture | null;
+}
+
+interface XrCameraViewLike {
+  camera?: {
+    width?: number;
+    height?: number;
+  } | null;
+}
+
 interface DetectResponseMessage {
   type: "detected";
   frameId: number;
@@ -50,6 +73,7 @@ export interface CameraWorkerDetectorOptions {
 }
 
 export type CameraWorkerDetectorStatus = "idle" | "starting" | "ready" | "failed";
+export type CameraWorkerUserMediaPreference = UserMediaPreference;
 
 const DEFAULT_MARKER_SIZE_METERS = 0.12;
 const MARKER_MODEL_SIZE_MM = 120;
@@ -81,27 +105,44 @@ export class CameraWorkerMarkerDetector implements MarkerDetector {
   private readonly captureHeight: number;
   private readonly minCaptureDeltaMs: number;
   private readonly staleThresholdMs: number;
+  private userMediaPreference: UserMediaPreference = "default";
 
   private worker: Worker | null = null;
   private stream: MediaStream | null = null;
+  private videoTrack: MediaStreamTrack | null = null;
   private video: HTMLVideoElement | null = null;
   private canvas: HTMLCanvasElement | null = null;
   private context2d: CanvasRenderingContext2D | null = null;
+  private imageCapture: { grabFrame: () => Promise<ImageBitmap> } | null = null;
+  private xrGl: WebGLRenderingContext | WebGL2RenderingContext | null = null;
+  private xrBinding: XrGlBindingLike | null = null;
+  private xrBindingSession: unknown = null;
+  private xrReadback: XrCameraReadback | null = null;
+  private captureBackend: CaptureBackend = "video";
+  private trackDiagnostics: TrackDiagnostics = createDefaultTrackDiagnostics();
   private latestDetections: WorkerDetection[] = [];
   private latestBestId: number | null = null;
   private latestDebug: WorkerDebugInfo = createEmptyDebugInfo();
   private latestSolvedPoseCount = 0;
   private latestPoseAttemptCount = 0;
   private latestPoseFailureReason = "none";
-  private lastDebugSignature = "";
-  private lastDebugLogAtMs = 0;
   private latestAtMs = 0;
   private frameCounter = 0;
   private workerBusy = false;
   private lastCaptureAtMs = 0;
+  private lastFrameCapturedAtMs = 0;
+  private xrCameraActive = false;
   private isStarting = false;
   private startFailed = false;
-  private didLogFirstCapture = false;
+  private readonly onTrackMuteBound = (): void => {
+    this.syncTrackDiagnostics("mute");
+  };
+  private readonly onTrackUnmuteBound = (): void => {
+    this.syncTrackDiagnostics("unmute");
+  };
+  private readonly onTrackEndedBound = (): void => {
+    this.syncTrackDiagnostics("ended");
+  };
 
   constructor(options: CameraWorkerDetectorOptions = {}) {
     this.captureWidth = options.captureWidth ?? 480;
@@ -112,14 +153,34 @@ export class CameraWorkerMarkerDetector implements MarkerDetector {
 
   detect(_frame: unknown, _referenceSpace: unknown): RawMarkerDetection[] {
     const now = performance.now();
+    this.ensureProcessingResources();
 
-    if (!this.worker && !this.isStarting && !this.startFailed) {
-      void this.start();
+    const xrFrameCaptureReady = this.canUseXrCameraFrame(_frame, _referenceSpace);
+    if (!xrFrameCaptureReady && !this.stream && !this.isStarting && !this.startFailed) {
+      void this.startUserMedia();
     }
 
-    if (this.worker && this.video && this.context2d && !this.workerBusy) {
-      if (now - this.lastCaptureAtMs >= this.minCaptureDeltaMs && this.video.readyState >= 2) {
-        this.captureAndDetect(now);
+    if (this.worker && this.context2d && !this.workerBusy && now - this.lastCaptureAtMs >= this.minCaptureDeltaMs) {
+      if (xrFrameCaptureReady) {
+        if (this.captureFromXrFrame(_frame, _referenceSpace, now)) {
+          this.xrCameraActive = true;
+        } else {
+          this.xrCameraActive = false;
+          const canCapture = this.imageCapture
+            ? true
+            : Boolean(this.video && this.video.readyState >= 2);
+          if (canCapture) {
+            this.captureAndDetect(now);
+          }
+        }
+      } else {
+        this.xrCameraActive = false;
+        const canCapture = this.imageCapture
+          ? true
+          : Boolean(this.video && this.video.readyState >= 2);
+        if (canCapture) {
+          this.captureAndDetect(now);
+        }
       }
     }
 
@@ -154,6 +215,25 @@ export class CameraWorkerMarkerDetector implements MarkerDetector {
     return this.video;
   }
 
+  setUserMediaPreference(preference: UserMediaPreference): void {
+    this.userMediaPreference = preference;
+  }
+
+  setXrGlContext(gl: WebGLRenderingContext | WebGL2RenderingContext | null): void {
+    if (this.xrGl === gl) {
+      return;
+    }
+    this.xrGl = gl;
+    this.xrBinding = null;
+    this.xrBindingSession = null;
+    this.xrReadback?.dispose();
+    this.xrReadback = null;
+  }
+
+  getFrameCanvas(): HTMLCanvasElement | null {
+    return this.canvas;
+  }
+
   /** Latest detections with pixel-space corners for overlay drawing. */
   getOverlayData(): {
     detections: WorkerDetection[];
@@ -164,6 +244,9 @@ export class CameraWorkerMarkerDetector implements MarkerDetector {
     solvedPoseCount: number;
     poseAttemptCount: number;
     poseFailureReason: string;
+    captureBackend: CaptureBackend;
+    trackDiagnostics: TrackDiagnostics;
+    frameCapturedAtMs: number;
   } {
     return {
       detections: this.latestDetections,
@@ -174,6 +257,9 @@ export class CameraWorkerMarkerDetector implements MarkerDetector {
       solvedPoseCount: this.latestSolvedPoseCount,
       poseAttemptCount: this.latestPoseAttemptCount,
       poseFailureReason: this.latestPoseFailureReason,
+      captureBackend: this.captureBackend,
+      trackDiagnostics: { ...this.trackDiagnostics },
+      frameCapturedAtMs: this.lastFrameCapturedAtMs,
     };
   }
 
@@ -183,12 +269,40 @@ export class CameraWorkerMarkerDetector implements MarkerDetector {
    * won't be blocked by the XR runtime's exclusive camera access.
    */
   async ensureStarted(): Promise<void> {
-    if (this.worker || this.isStarting) return;
+    this.ensureProcessingResources();
+    if (this.stream || this.isStarting) return;
     if (this.startFailed) {
       // Reset so we can retry
       this.startFailed = false;
     }
-    await this.start();
+    await this.startUserMedia();
+  }
+
+  async restartUserMedia(): Promise<void> {
+    if (this.isStarting) {
+      return;
+    }
+
+    this.detachTrackDiagnostics();
+    if (this.stream) {
+      for (const track of this.stream.getTracks()) {
+        track.stop();
+      }
+      this.stream = null;
+    }
+    if (this.video) {
+      this.video.srcObject = null;
+      this.video.remove();
+      this.video = null;
+    }
+    this.videoTrack = null;
+    this.imageCapture = null;
+    this.trackDiagnostics = createDefaultTrackDiagnostics();
+    if (!this.xrCameraActive) {
+      this.captureBackend = "video";
+    }
+    this.startFailed = false;
+    await this.startUserMedia();
   }
 
   getStatus(): CameraWorkerDetectorStatus {
@@ -198,7 +312,7 @@ export class CameraWorkerMarkerDetector implements MarkerDetector {
     if (this.isStarting) {
       return "starting";
     }
-    if (this.worker && this.stream && this.video) {
+    if (this.worker && this.canvas && ((this.stream && this.video) || this.xrCameraActive)) {
       return "ready";
     }
     return "idle";
@@ -210,6 +324,11 @@ export class CameraWorkerMarkerDetector implements MarkerDetector {
       this.worker = null;
     }
 
+    this.detachTrackDiagnostics();
+    this.xrReadback?.dispose();
+    this.xrReadback = null;
+    this.xrBinding = null;
+    this.xrBindingSession = null;
     if (this.stream) {
       for (const track of this.stream.getTracks()) {
         track.stop();
@@ -225,35 +344,107 @@ export class CameraWorkerMarkerDetector implements MarkerDetector {
 
     this.canvas = null;
     this.context2d = null;
+    this.imageCapture = null;
+    this.xrGl = null;
+    this.captureBackend = "video";
+    this.trackDiagnostics = createDefaultTrackDiagnostics();
     this.latestDetections = [];
     this.latestDebug = createEmptyDebugInfo();
     this.latestSolvedPoseCount = 0;
     this.latestPoseAttemptCount = 0;
     this.latestPoseFailureReason = "none";
     this.latestAtMs = 0;
+    this.lastFrameCapturedAtMs = 0;
+    this.xrCameraActive = false;
     this.workerBusy = false;
-    this.lastDebugSignature = "";
-    this.lastDebugLogAtMs = 0;
-    this.didLogFirstCapture = false;
   }
 
-  private async start(): Promise<void> {
+  private ensureProcessingResources(): void {
+    if (!this.canvas || !this.context2d) {
+      const canvas = document.createElement("canvas");
+      canvas.width = this.captureWidth;
+      canvas.height = this.captureHeight;
+      const context2d = canvas.getContext("2d", { willReadFrequently: true });
+      if (!context2d) {
+        this.startFailed = true;
+        return;
+      }
+      this.canvas = canvas;
+      this.context2d = context2d;
+    }
+
+    if (this.worker) {
+      return;
+    }
+
+    const worker = new Worker(new URL("./marker-worker.ts", import.meta.url), {
+      type: "module"
+    });
+
+    worker.addEventListener("message", (event: MessageEvent<DetectResponseMessage>) => {
+      const payload = event.data;
+      if (!payload || payload.type !== "detected") {
+        return;
+      }
+      this.latestDetections = payload.detections;
+      this.latestBestId = payload.bestId;
+      this.latestDebug = payload.debug;
+      this.latestSolvedPoseCount = 0;
+      this.latestPoseAttemptCount = 0;
+      this.latestPoseFailureReason = "none";
+      this.latestAtMs = performance.now();
+      this.workerBusy = false;
+    });
+
+    worker.addEventListener("error", () => {
+      console.error("[marker-worker] worker error");
+      this.startFailed = true;
+      this.latestDetections = [];
+      this.latestBestId = null;
+      this.latestDebug = createEmptyDebugInfo();
+      this.latestSolvedPoseCount = 0;
+      this.latestPoseAttemptCount = 0;
+      this.latestPoseFailureReason = "none";
+      this.workerBusy = false;
+    });
+
+    worker.addEventListener("messageerror", () => {
+      console.error("[marker-worker] worker messageerror");
+      this.startFailed = true;
+      this.latestDetections = [];
+      this.latestBestId = null;
+      this.latestDebug = createEmptyDebugInfo();
+      this.latestSolvedPoseCount = 0;
+      this.latestPoseAttemptCount = 0;
+      this.latestPoseFailureReason = "none";
+      this.workerBusy = false;
+    });
+
+    this.worker = worker;
+  }
+
+  private async startUserMedia(): Promise<void> {
     this.isStarting = true;
 
     try {
+      this.ensureProcessingResources();
+      if (!this.worker || !this.context2d || !this.canvas) {
+        this.startFailed = true;
+        return;
+      }
       if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== "function") {
         this.startFailed = true;
         return;
       }
 
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: { ideal: "environment" },
-          width: { ideal: this.captureWidth },
-          height: { ideal: this.captureHeight }
-        },
-        audio: false
-      });
+      const stream = await this.requestPreferredUserMediaStream();
+
+      const [videoTrack] = stream.getVideoTracks();
+      this.attachTrackDiagnostics(videoTrack ?? null);
+      this.imageCapture = createImageCapture(videoTrack ?? null);
+      if (!this.xrCameraActive) {
+        this.captureBackend = this.imageCapture ? "imagecapture" : "video";
+      }
 
       const video = document.createElement("video");
       video.playsInline = true;
@@ -271,74 +462,8 @@ export class CameraWorkerMarkerDetector implements MarkerDetector {
       } catch {
         // Some browsers gate play(); capture will begin once video can play.
       }
-
-      const canvas = document.createElement("canvas");
-      canvas.width = this.captureWidth;
-      canvas.height = this.captureHeight;
-      const context2d = canvas.getContext("2d", { willReadFrequently: true });
-      if (!context2d) {
-        this.startFailed = true;
-        for (const track of stream.getTracks()) {
-          track.stop();
-        }
-        video.remove();
-        return;
-      }
-
-      const worker = new Worker(new URL("./marker-worker.ts", import.meta.url), {
-        type: "module"
-      });
-      console.info("[marker-worker] started", {
-        captureWidth: this.captureWidth,
-        captureHeight: this.captureHeight,
-        maxCaptureHz: Math.round(1000 / this.minCaptureDeltaMs),
-      });
-
-      worker.addEventListener("message", (event: MessageEvent<DetectResponseMessage>) => {
-        const payload = event.data;
-        if (!payload || payload.type !== "detected") {
-          return;
-        }
-        this.latestDetections = payload.detections;
-        this.latestBestId = payload.bestId;
-        this.latestDebug = payload.debug;
-        this.latestSolvedPoseCount = 0;
-        this.latestPoseAttemptCount = 0;
-        this.latestPoseFailureReason = "none";
-        this.latestAtMs = performance.now();
-        this.workerBusy = false;
-        this.maybeLogDebug(payload.debug);
-      });
-
-      worker.addEventListener("error", () => {
-        console.error("[marker-worker] worker error");
-        this.startFailed = true;
-        this.latestDetections = [];
-        this.latestBestId = null;
-        this.latestDebug = createEmptyDebugInfo();
-        this.latestSolvedPoseCount = 0;
-        this.latestPoseAttemptCount = 0;
-        this.latestPoseFailureReason = "none";
-        this.workerBusy = false;
-      });
-
-      worker.addEventListener("messageerror", () => {
-        console.error("[marker-worker] worker messageerror");
-        this.startFailed = true;
-        this.latestDetections = [];
-        this.latestBestId = null;
-        this.latestDebug = createEmptyDebugInfo();
-        this.latestSolvedPoseCount = 0;
-        this.latestPoseAttemptCount = 0;
-        this.latestPoseFailureReason = "none";
-        this.workerBusy = false;
-      });
-
-      this.worker = worker;
       this.stream = stream;
       this.video = video;
-      this.canvas = canvas;
-      this.context2d = context2d;
       this.startFailed = false;
     } catch {
       this.startFailed = true;
@@ -348,30 +473,70 @@ export class CameraWorkerMarkerDetector implements MarkerDetector {
   }
 
   private captureAndDetect(nowMs: number): void {
-    if (!this.worker || !this.video || !this.context2d || !this.canvas) {
+    if (!this.worker || !this.context2d || !this.canvas) {
       return;
-    }
-
-    this.context2d.drawImage(this.video, 0, 0, this.captureWidth, this.captureHeight);
-    const imageData = this.context2d.getImageData(0, 0, this.captureWidth, this.captureHeight);
-    if (!this.didLogFirstCapture) {
-      this.didLogFirstCapture = true;
-      console.info("[marker-worker] first frame captured", {
-        captureWidth: this.captureWidth,
-        captureHeight: this.captureHeight,
-        videoWidth: this.video.videoWidth,
-        videoHeight: this.video.videoHeight,
-      });
     }
 
     this.workerBusy = true;
     this.lastCaptureAtMs = nowMs;
     this.frameCounter += 1;
+    if (this.imageCapture) {
+      void this.captureFromTrack(this.frameCounter);
+      return;
+    }
+    this.captureFromVideo(this.frameCounter);
+  }
 
+  private captureFromVideo(frameId: number): void {
+    if (!this.video || !this.context2d || !this.canvas) {
+      this.workerBusy = false;
+      return;
+    }
+
+    if (this.video.readyState < 2) {
+      this.workerBusy = false;
+      return;
+    }
+
+    this.captureBackend = "video";
+    this.context2d.drawImage(this.video, 0, 0, this.captureWidth, this.captureHeight);
+    this.lastFrameCapturedAtMs = performance.now();
+    this.postCanvasToWorker(frameId);
+  }
+
+  private async captureFromTrack(frameId: number): Promise<void> {
+    if (!this.imageCapture || !this.context2d || !this.canvas) {
+      this.workerBusy = false;
+      return;
+    }
+
+    try {
+      this.captureBackend = "imagecapture";
+      const frame = await this.imageCapture.grabFrame();
+      this.context2d.drawImage(frame, 0, 0, this.captureWidth, this.captureHeight);
+      frame.close();
+      this.lastFrameCapturedAtMs = performance.now();
+      this.syncTrackDiagnostics("none");
+      this.postCanvasToWorker(frameId);
+    } catch {
+      this.syncTrackDiagnostics("grab-failed");
+      this.imageCapture = null;
+      this.captureBackend = "video";
+      this.captureFromVideo(frameId);
+    }
+  }
+
+  private postCanvasToWorker(frameId: number): void {
+    if (!this.worker || !this.context2d) {
+      this.workerBusy = false;
+      return;
+    }
+
+    const imageData = this.context2d.getImageData(0, 0, this.captureWidth, this.captureHeight);
     this.worker.postMessage(
       {
         type: "detect",
-        frameId: this.frameCounter,
+        frameId,
         width: this.captureWidth,
         height: this.captureHeight,
         pixels: imageData.data.buffer
@@ -380,38 +545,210 @@ export class CameraWorkerMarkerDetector implements MarkerDetector {
     );
   }
 
-  private maybeLogDebug(debug: WorkerDebugInfo): void {
-    const payload = {
-      decodedMarkers: debug.decodedMarkers,
-      contourCount: debug.contourCount,
-      polyCount: debug.polyCount,
-      candidateQuadCount: debug.candidateQuadCount,
-      validIdCount: debug.validIdCount,
-      candidateCount: debug.candidateCount,
-      stableCount: debug.stableCount,
-      filteredCount: debug.filteredCount,
-      rejectedInvalidId: debug.rejectedInvalidId,
-      rejectedTooSmall: debug.rejectedTooSmall,
-      rejectedBadAspect: debug.rejectedBadAspect,
-      rejectedLowConfidence: debug.rejectedLowConfidence,
-    };
-    const nowMs = performance.now();
-    const signature = JSON.stringify(payload);
-    if (signature === this.lastDebugSignature && nowMs - this.lastDebugLogAtMs < 2000) {
-      return;
-    }
-    this.lastDebugSignature = signature;
-    this.lastDebugLogAtMs = nowMs;
+  private async requestPreferredUserMediaStream(): Promise<MediaStream> {
+    const initialStream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: { ideal: "environment" },
+        width: { ideal: this.captureWidth },
+        height: { ideal: this.captureHeight }
+      },
+      audio: false
+    });
 
-    if (debug.decodedMarkers === 0) {
-      console.warn("[marker-worker] no decoded markers", payload);
+    if (this.userMediaPreference !== "quest-passthrough") {
+      return initialStream;
+    }
+
+    const initialTrack = initialStream.getVideoTracks()[0];
+    if (!initialTrack || !navigator.mediaDevices || typeof navigator.mediaDevices.enumerateDevices !== "function") {
+      return initialStream;
+    }
+
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const preferred = selectQuestPassthroughCamera(devices);
+    const currentDeviceId = initialTrack.getSettings().deviceId;
+    if (!preferred?.deviceId || preferred.deviceId === currentDeviceId) {
+      return initialStream;
+    }
+
+    try {
+      const replacementStream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          deviceId: { exact: preferred.deviceId },
+          width: { ideal: this.captureWidth },
+          height: { ideal: this.captureHeight }
+        },
+        audio: false
+      });
+      for (const track of initialStream.getTracks()) {
+        track.stop();
+      }
+      return replacementStream;
+    } catch {
+      return initialStream;
+    }
+  }
+
+  private canUseXrCameraFrame(frame: unknown, referenceSpace: unknown): boolean {
+    return Boolean(this.resolveXrCameraFrame(frame, referenceSpace));
+  }
+
+  private captureFromXrFrame(frame: unknown, referenceSpace: unknown, nowMs: number): boolean {
+    if (!this.context2d || !this.canvas) {
+      return false;
+    }
+
+    const xrFrame = this.resolveXrCameraFrame(frame, referenceSpace);
+    if (!xrFrame || !this.xrGl) {
+      return false;
+    }
+
+    const binding = this.getOrCreateXrBinding(xrFrame.session);
+    if (!binding) {
+      return false;
+    }
+
+    const sourceTexture = binding.getCameraImage(xrFrame.camera);
+    if (!sourceTexture) {
+      return false;
+    }
+
+    const sourceWidth = xrFrame.camera.width ?? this.captureWidth;
+    const sourceHeight = xrFrame.camera.height ?? this.captureHeight;
+    const readback = this.ensureXrReadback();
+    if (!readback) {
+      return false;
+    }
+
+    const copied = readback.copyCameraTextureToCanvas(
+      sourceTexture,
+      sourceWidth,
+      sourceHeight,
+      this.context2d
+    );
+    if (!copied) {
+      return false;
+    }
+
+    this.workerBusy = true;
+    this.lastCaptureAtMs = nowMs;
+    this.frameCounter += 1;
+    this.lastFrameCapturedAtMs = performance.now();
+    this.captureBackend = "xr-camera";
+    this.postCanvasToWorker(this.frameCounter);
+    return true;
+  }
+
+  private attachTrackDiagnostics(track: MediaStreamTrack | null): void {
+    this.detachTrackDiagnostics();
+    this.videoTrack = track;
+    if (!track) {
+      this.trackDiagnostics = createDefaultTrackDiagnostics();
       return;
     }
-    if (debug.filteredCount === 0) {
-      console.warn("[marker-worker] decoded markers but nothing survived filtering", payload);
+
+    track.addEventListener("mute", this.onTrackMuteBound);
+    track.addEventListener("unmute", this.onTrackUnmuteBound);
+    track.addEventListener("ended", this.onTrackEndedBound);
+    this.syncTrackDiagnostics("none");
+  }
+
+  private detachTrackDiagnostics(): void {
+    if (!this.videoTrack) {
       return;
     }
-    console.info("[marker-worker] decoded markers available", payload);
+
+    this.videoTrack.removeEventListener("mute", this.onTrackMuteBound);
+    this.videoTrack.removeEventListener("unmute", this.onTrackUnmuteBound);
+    this.videoTrack.removeEventListener("ended", this.onTrackEndedBound);
+    this.videoTrack = null;
+  }
+
+  private syncTrackDiagnostics(lastEvent: TrackEventReason): void {
+    if (!this.videoTrack) {
+      this.trackDiagnostics = createDefaultTrackDiagnostics(lastEvent);
+      return;
+    }
+
+    this.trackDiagnostics = {
+      readyState: this.videoTrack.readyState,
+      enabled: this.videoTrack.enabled,
+      muted: this.videoTrack.muted,
+      label: this.videoTrack.label || "camera-track",
+      lastEvent,
+    };
+  }
+
+  private getOrCreateXrBinding(session: unknown): XrGlBindingLike | null {
+    if (!this.xrGl || !session) {
+      return null;
+    }
+    if (this.xrBinding && this.xrBindingSession === session) {
+      return this.xrBinding;
+    }
+
+    const BindingCtor = (
+      globalThis as typeof globalThis & {
+        XRWebGLBinding?: new (
+          sessionLike: unknown,
+          gl: WebGLRenderingContext | WebGL2RenderingContext
+        ) => XrGlBindingLike;
+      }
+    ).XRWebGLBinding;
+
+    if (typeof BindingCtor !== "function") {
+      return null;
+    }
+
+    try {
+      this.xrBinding = new BindingCtor(session, this.xrGl);
+      this.xrBindingSession = session;
+      return this.xrBinding;
+    } catch {
+      this.xrBinding = null;
+      this.xrBindingSession = null;
+      return null;
+    }
+  }
+
+  private ensureXrReadback(): XrCameraReadback | null {
+    if (!this.xrGl) {
+      return null;
+    }
+    if (!this.xrReadback) {
+      this.xrReadback = new XrCameraReadback(this.xrGl, this.captureWidth, this.captureHeight);
+    }
+    return this.xrReadback;
+  }
+
+  private resolveXrCameraFrame(
+    frame: unknown,
+    referenceSpace: unknown
+  ): { session: unknown; camera: NonNullable<XrCameraViewLike["camera"]> } | null {
+    if (!frame || typeof frame !== "object") {
+      return null;
+    }
+
+    const frameLike = frame as {
+      session?: unknown;
+      getViewerPose?: (refSpace: unknown) => { views?: XrCameraViewLike[] } | null;
+    };
+
+    if (typeof frameLike.getViewerPose !== "function") {
+      return null;
+    }
+
+    const pose = frameLike.getViewerPose(referenceSpace);
+    const view = pose?.views?.find((candidate) => Boolean(candidate?.camera));
+    const camera = view?.camera;
+    if (!camera) {
+      return null;
+    }
+
+    return {
+      session: frameLike.session ?? null,
+      camera,
+    };
   }
 }
 
@@ -575,6 +912,273 @@ function createEmptyDebugInfo(): WorkerDebugInfo {
     rejectedBadAspect: 0,
     rejectedLowConfidence: 0,
   };
+}
+
+function createDefaultTrackDiagnostics(lastEvent: TrackEventReason = "none"): TrackDiagnostics {
+  return {
+    readyState: "unknown",
+    enabled: false,
+    muted: false,
+    label: "",
+    lastEvent,
+  };
+}
+
+function createImageCapture(
+  track: MediaStreamTrack | null
+): { grabFrame: () => Promise<ImageBitmap> } | null {
+  if (!track) {
+    return null;
+  }
+
+  const maybeCtor = (
+    globalThis as typeof globalThis & {
+      ImageCapture?: new (videoTrack: MediaStreamTrack) => unknown;
+    }
+  ).ImageCapture;
+
+  if (typeof maybeCtor !== "function") {
+    return null;
+  }
+
+  try {
+    const capture = new maybeCtor(track) as { grabFrame?: () => Promise<ImageBitmap> };
+    if (typeof capture.grabFrame !== "function") {
+      return null;
+    }
+    return {
+      grabFrame: () => capture.grabFrame!()
+    };
+  } catch {
+    return null;
+  }
+}
+
+function selectQuestPassthroughCamera(devices: MediaDeviceInfo[]): MediaDeviceInfo | null {
+  const videoInputs = devices.filter((device) => device.kind === "videoinput");
+  if (videoInputs.length === 0) {
+    return null;
+  }
+
+  const exactPreferred = videoInputs.find((device) =>
+    /camera\s+(2 2|2),\s*facing back/i.test(device.label)
+  );
+  if (exactPreferred) {
+    return exactPreferred;
+  }
+
+  const secondaryPreferred = videoInputs.find((device) =>
+    /camera\s+(2 1|1),\s*facing back/i.test(device.label)
+  );
+  if (secondaryPreferred) {
+    return secondaryPreferred;
+  }
+
+  const anyBackFacing = videoInputs.find((device) => /facing back/i.test(device.label));
+  if (anyBackFacing) {
+    return anyBackFacing;
+  }
+
+  return null;
+}
+
+class XrCameraReadback {
+  private readonly gl: WebGLRenderingContext | WebGL2RenderingContext;
+  private readonly width: number;
+  private readonly height: number;
+  private readonly program: WebGLProgram | null;
+  private readonly vertexBuffer: WebGLBuffer | null;
+  private readonly framebuffer: WebGLFramebuffer | null;
+  private readonly targetTexture: WebGLTexture | null;
+  private readonly positionLocation: number;
+  private readonly uvLocation: number;
+  private readonly textureLocation: WebGLUniformLocation | null;
+  private readonly pixelBuffer: ArrayBuffer;
+  private readonly pixelBytes: Uint8Array;
+  private readonly imageData: ImageData;
+
+  constructor(gl: WebGLRenderingContext | WebGL2RenderingContext, width: number, height: number) {
+    this.gl = gl;
+    this.width = width;
+    this.height = height;
+    this.pixelBuffer = new ArrayBuffer(width * height * 4);
+    this.pixelBytes = new Uint8Array(this.pixelBuffer);
+    this.imageData = new ImageData(new Uint8ClampedArray(this.pixelBuffer), width, height);
+
+    const vertexShader = compileShader(
+      gl,
+      gl.VERTEX_SHADER,
+      [
+        "attribute vec2 aPosition;",
+        "attribute vec2 aUv;",
+        "varying vec2 vUv;",
+        "void main() {",
+        "  vUv = aUv;",
+        "  gl_Position = vec4(aPosition, 0.0, 1.0);",
+        "}"
+      ].join("\n")
+    );
+    const fragmentShader = compileShader(
+      gl,
+      gl.FRAGMENT_SHADER,
+      [
+        "precision mediump float;",
+        "varying vec2 vUv;",
+        "uniform sampler2D uTexture;",
+        "void main() {",
+        "  gl_FragColor = texture2D(uTexture, vUv);",
+        "}"
+      ].join("\n")
+    );
+    this.program = createProgram(gl, vertexShader, fragmentShader);
+    if (vertexShader) {
+      gl.deleteShader(vertexShader);
+    }
+    if (fragmentShader) {
+      gl.deleteShader(fragmentShader);
+    }
+
+    this.positionLocation = this.program ? gl.getAttribLocation(this.program, "aPosition") : -1;
+    this.uvLocation = this.program ? gl.getAttribLocation(this.program, "aUv") : -1;
+    this.textureLocation = this.program ? gl.getUniformLocation(this.program, "uTexture") : null;
+
+    this.vertexBuffer = gl.createBuffer();
+    if (this.vertexBuffer) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.vertexBuffer);
+      gl.bufferData(
+        gl.ARRAY_BUFFER,
+        new Float32Array([
+          -1, -1, 0, 1,
+          -1, 1, 0, 0,
+          1, -1, 1, 1,
+          1, 1, 1, 0,
+        ]),
+        gl.STATIC_DRAW
+      );
+      gl.bindBuffer(gl.ARRAY_BUFFER, null);
+    }
+
+    this.targetTexture = gl.createTexture();
+    if (this.targetTexture) {
+      gl.bindTexture(gl.TEXTURE_2D, this.targetTexture);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      gl.bindTexture(gl.TEXTURE_2D, null);
+    }
+
+    this.framebuffer = gl.createFramebuffer();
+    if (this.framebuffer && this.targetTexture) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.framebuffer);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.targetTexture, 0);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    }
+  }
+
+  copyCameraTextureToCanvas(
+    sourceTexture: WebGLTexture,
+    _sourceWidth: number,
+    _sourceHeight: number,
+    ctx: CanvasRenderingContext2D
+  ): boolean {
+    const gl = this.gl;
+    if (
+      !this.program ||
+      !this.vertexBuffer ||
+      !this.framebuffer ||
+      !this.targetTexture ||
+      this.positionLocation < 0 ||
+      this.uvLocation < 0 ||
+      !this.textureLocation
+    ) {
+      return false;
+    }
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.framebuffer);
+    gl.viewport(0, 0, this.width, this.height);
+    gl.useProgram(this.program);
+    gl.disable(gl.DEPTH_TEST);
+    gl.disable(gl.CULL_FACE);
+    gl.disable(gl.BLEND);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.vertexBuffer);
+    gl.enableVertexAttribArray(this.positionLocation);
+    gl.vertexAttribPointer(this.positionLocation, 2, gl.FLOAT, false, 16, 0);
+    gl.enableVertexAttribArray(this.uvLocation);
+    gl.vertexAttribPointer(this.uvLocation, 2, gl.FLOAT, false, 16, 8);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, sourceTexture);
+    gl.uniform1i(this.textureLocation, 0);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.readPixels(0, 0, this.width, this.height, gl.RGBA, gl.UNSIGNED_BYTE, this.pixelBytes);
+
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    gl.disableVertexAttribArray(this.positionLocation);
+    gl.disableVertexAttribArray(this.uvLocation);
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+    ctx.putImageData(this.imageData, 0, 0);
+    return true;
+  }
+
+  dispose(): void {
+    if (this.targetTexture) {
+      this.gl.deleteTexture(this.targetTexture);
+    }
+    if (this.framebuffer) {
+      this.gl.deleteFramebuffer(this.framebuffer);
+    }
+    if (this.vertexBuffer) {
+      this.gl.deleteBuffer(this.vertexBuffer);
+    }
+    if (this.program) {
+      this.gl.deleteProgram(this.program);
+    }
+  }
+}
+
+function compileShader(
+  gl: WebGLRenderingContext | WebGL2RenderingContext,
+  type: number,
+  source: string
+): WebGLShader | null {
+  const shader = gl.createShader(type);
+  if (!shader) {
+    return null;
+  }
+  gl.shaderSource(shader, source);
+  gl.compileShader(shader);
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+    gl.deleteShader(shader);
+    return null;
+  }
+  return shader;
+}
+
+function createProgram(
+  gl: WebGLRenderingContext | WebGL2RenderingContext,
+  vertexShader: WebGLShader | null,
+  fragmentShader: WebGLShader | null
+): WebGLProgram | null {
+  if (!vertexShader || !fragmentShader) {
+    return null;
+  }
+  const program = gl.createProgram();
+  if (!program) {
+    return null;
+  }
+  gl.attachShader(program, vertexShader);
+  gl.attachShader(program, fragmentShader);
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    gl.deleteProgram(program);
+    return null;
+  }
+  return program;
 }
 
 function solvePoseFromCorners(

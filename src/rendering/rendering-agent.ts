@@ -40,10 +40,13 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
   let unsubscribeXrFrame: (() => void) | null = null;
   let unsubscribePerformance: (() => void) | null = null;
   let unsubscribeTrackingStatus: (() => void) | null = null;
+  let unsubscribeSpawnAnchor: (() => void) | null = null;
   let unsubscribeHands: (() => void) | null = null;
   let unsubscribePinch: (() => void) | null = null;
   let animationHandle = 0;
   let xrRunning = false;
+  let hasLockedSpawnAnchor = false;
+  let hudDragHand: "left" | "right" | null = null;
 
   // Load KML if provided
   if (options.kmlText) {
@@ -53,6 +56,9 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
 
   const markerPos = new Vector3();
   const markerQuat = new Quaternion();
+  const lockedSpawnPos = new Vector3();
+  const lockedSpawnQuat = new Quaternion();
+  const pinchPoint = new Vector3();
 
   // Debug HUD state
   const hudData: DebugHudData = {
@@ -83,6 +89,7 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
       renderer.tick(timeMs);
     }
     labelManager.updateVisibility(options.camera);
+    handVisualizer.update(options.camera);
     // Keep HUD position locked to camera every frame (including desktop)
     debugHud.update(hudData, timeMs, options.camera);
     animationHandle = window.requestAnimationFrame(animate);
@@ -121,8 +128,10 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
             hudData.bestConfidence = 0;
           }
 
-          // Anchor KML map to the first detected marker
-          if (kmlMap.isLoaded() && payload.markers.length > 0) {
+          // Prefer the explicit pre-locked spawn anchor once available.
+          if (kmlMap.isLoaded() && hasLockedSpawnAnchor) {
+            kmlMap.anchorToMarker(lockedSpawnPos, lockedSpawnQuat);
+          } else if (kmlMap.isLoaded() && payload.markers.length > 0) {
             const first = payload.markers[0];
             markerPos.set(
               first.pose.position.x,
@@ -138,6 +147,28 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
             kmlMap.anchorToMarker(markerPos, markerQuat);
           } else {
             kmlMap.hide();
+          }
+        });
+
+        unsubscribeSpawnAnchor = context.events.on("tracking/spawn-anchor", (payload) => {
+          if (!payload.position || !payload.rotation) {
+            hasLockedSpawnAnchor = false;
+            renderer.setPreferredSpawnAnchor(null);
+            return;
+          }
+
+          lockedSpawnPos.set(payload.position.x, payload.position.y, payload.position.z);
+          lockedSpawnQuat.set(
+            payload.rotation.x,
+            payload.rotation.y,
+            payload.rotation.z,
+            payload.rotation.w
+          );
+          hasLockedSpawnAnchor = true;
+          renderer.setPreferredSpawnAnchor(lockedSpawnPos);
+
+          if (kmlMap.isLoaded()) {
+            kmlMap.anchorToMarker(lockedSpawnPos, lockedSpawnQuat);
           }
         });
 
@@ -163,6 +194,7 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
             renderer.tick(payload.time);
           }
           labelManager.updateVisibility(options.camera);
+          handVisualizer.update(options.camera);
           hudData.hudMode = debugHud.mode;
           debugHud.update(hudData, payload.time, options.camera);
         });
@@ -188,7 +220,22 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
         });
 
         unsubscribeHands = context.events.on("interaction/hands", (payload) => {
-          handVisualizer.update(payload.hands);
+          handVisualizer.setHands(payload.hands);
+          handVisualizer.update(options.camera);
+          if (hudDragHand) {
+            const dragHand = payload.hands.find((hand) => hand.hand === hudDragHand && hand.pinching);
+            if (dragHand) {
+              pinchPoint.set(
+                dragHand.pinchPoint.x,
+                dragHand.pinchPoint.y,
+                dragHand.pinchPoint.z,
+              );
+              debugHud.dragTo(pinchPoint, options.camera);
+            } else {
+              debugHud.endDrag();
+              hudDragHand = null;
+            }
+          }
           hudData.handsDetected = payload.hands.length;
           hudData.leftPinch = false;
           hudData.rightPinch = false;
@@ -213,10 +260,20 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
           }
         });
 
-        // Pinch toggles HUD mode
         unsubscribePinch = context.events.on("interaction/pinch", (payload) => {
-          if (payload.state === "start" && payload.hand === "left") {
-            debugHud.toggleMode();
+          if (payload.hand !== "left") {
+            return;
+          }
+
+          pinchPoint.set(payload.position.x, payload.position.y, payload.position.z);
+
+          if (payload.state === "start") {
+            if (debugHud.beginDrag(pinchPoint, options.camera)) {
+              hudDragHand = "left";
+            }
+          } else if (hudDragHand === "left") {
+            debugHud.endDrag();
+            hudDragHand = null;
           }
         });
 
@@ -266,6 +323,10 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
         unsubscribeTrackingStatus();
         unsubscribeTrackingStatus = null;
       }
+      if (unsubscribeSpawnAnchor) {
+        unsubscribeSpawnAnchor();
+        unsubscribeSpawnAnchor = null;
+      }
       if (unsubscribeHands) {
         unsubscribeHands();
         unsubscribeHands = null;
@@ -278,6 +339,8 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
         window.cancelAnimationFrame(animationHandle);
         animationHandle = 0;
       }
+      debugHud.endDrag();
+      hudDragHand = null;
       kmlMap.dispose();
       markerIndicators.dispose();
       handVisualizer.dispose();

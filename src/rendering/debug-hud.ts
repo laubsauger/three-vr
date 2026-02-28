@@ -49,6 +49,8 @@ export class DebugHud {
   private lastData: DebugHudData | null = null;
   private lastUpdateMs = 0;
   private _mode: HudMode = "follow";
+  private isDragging = false;
+  private readonly dragOffset = new Vector3();
 
   /** Offset from camera in "follow" mode (bottom-left corner). */
   private readonly followOffset = new Vector3(-0.28, -0.18, -0.5);
@@ -93,6 +95,50 @@ export class DebugHud {
     this._mode = mode;
   }
 
+  beginDrag(point: Vector3, camera?: Camera): boolean {
+    if (!camera || !this.containsPoint(point, camera)) {
+      return false;
+    }
+
+    this.setMode("pinned");
+    this.isDragging = true;
+    this.dragOffset.copy(this.sprite.position).sub(point);
+    this.faceCamera(camera);
+    return true;
+  }
+
+  dragTo(point: Vector3, camera?: Camera): void {
+    if (!this.isDragging) {
+      return;
+    }
+
+    this.sprite.position.copy(point).add(this.dragOffset);
+    if (camera) {
+      this.faceCamera(camera);
+    }
+  }
+
+  endDrag(): void {
+    this.isDragging = false;
+  }
+
+  containsPoint(point: Vector3, camera: Camera, padding = 0.04): boolean {
+    camera.getWorldQuaternion(this.tmpQuat);
+
+    this.tmpForward.set(0, 0, -1).applyQuaternion(this.tmpQuat);
+    this.tmpRight.set(1, 0, 0).applyQuaternion(this.tmpQuat);
+    this.tmpUp.set(0, 1, 0).applyQuaternion(this.tmpQuat);
+
+    this.tmpPos.copy(point).sub(this.sprite.position);
+    const depth = this.tmpPos.dot(this.tmpForward);
+    const x = this.tmpPos.dot(this.tmpRight);
+    const y = this.tmpPos.dot(this.tmpUp);
+    const halfWidth = this.sprite.scale.x * 0.5 + padding;
+    const halfHeight = this.sprite.scale.y * 0.5 + padding;
+
+    return Math.abs(depth) <= 0.18 && Math.abs(x) <= halfWidth && Math.abs(y) <= halfHeight;
+  }
+
   /**
    * Call every frame to keep the HUD locked to the camera view.
    * Position updates run every frame; texture redraws are throttled.
@@ -112,9 +158,10 @@ export class DebugHud {
         .addScaledVector(this.tmpForward, -this.followOffset.z)
         .addScaledVector(this.tmpRight, this.followOffset.x)
         .addScaledVector(this.tmpUp, this.followOffset.y);
+    }
 
-      // Face the sprite toward the camera so it reads correctly at any angle.
-      this.sprite.quaternion.copy(this.tmpQuat);
+    if (camera) {
+      this.faceCamera(camera);
     }
 
     if (timeMs - this.lastUpdateMs < this.updateIntervalMs) return;
@@ -261,6 +308,11 @@ export class DebugHud {
     }
 
     this.texture.needsUpdate = true;
+  }
+
+  private faceCamera(camera: Camera): void {
+    camera.getWorldQuaternion(this.tmpQuat);
+    this.sprite.quaternion.copy(this.tmpQuat);
   }
 }
 

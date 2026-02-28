@@ -1,0 +1,47 @@
+{
+  "name": "camera-access",
+  "version": "1.0.0",
+  "description": "Reactylon app created by create-reactylon-app.",
+  "scripts": {
+    "start": "webpack serve --port 3000 --mode=development",
+    "build": "webpack --mode=production"
+  },
+  "dependencies": {
+    "@babylonjs/core": "^8.0.0",
+    "@babylonjs/gui": "^8.0.0",
+    "@babylonjs/loaders": "^8.0.0",
+    "@tensorflow-models/coco-ssd": "^2.2.3",
+    "@tensorflow/tfjs": "^4.22.0",
+    "@tensorflow/tfjs-backend-webgpu": "^4.22.0",
+    "react": "^19",
+    "react-dom": "^19",
+    "reactylon": "^3.0.0"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.17.3",
+    "@babel/preset-env": "^7.24.3",
+    "@babel/preset-react": "^7.26.3",
+    "@babel/preset-typescript": "^7.24.1",
+    "@babel/register": "^7.23.7",
+    "@types/node": "^20.11.30",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@types/webpack": "^5.28.5",
+    "babel-loader": "^10.0.0",
+    "babel-plugin-reactylon": "^1.0.0",
+    "css-loader": "^6.10.0",
+    "fork-ts-checker-webpack-plugin": "^9.0.3",
+    "html-webpack-plugin": "^5.5.0",
+    "style-loader": "^4.0.0",
+    "ts-loader": "^9.4.1",
+    "typescript": "^5.4.3",
+    "url-loader": "^4.1.1",
+    "webpack": "^5.91.0",
+    "webpack-cli": "^5.1.4",
+    "webpack-dev-server": "^5.0.4"
+  },
+  "engines": {
+    "node": "^22.11.0",
+    "npm": "^10.9.0"
+  }
+}

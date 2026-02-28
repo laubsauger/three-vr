@@ -30,6 +30,8 @@ interface LinkVisualState {
   group: Group;
   segments: Array<Mesh<CylinderGeometry, MeshStandardMaterial>>;
   packet: Mesh<SphereGeometry, MeshStandardMaterial>;
+  segmentMaterial: MeshStandardMaterial;
+  packetMaterial: MeshStandardMaterial;
   flowHz: number;
   targetFlowHz: number;
   beamRadius: number;
@@ -50,11 +52,10 @@ export class InfraSceneRenderer {
   private readonly nodeGroup = new Group();
   private readonly linkGroup = new Group();
   private readonly markerAnchors = new Map<number, Vector3>();
+  private preferredSpawnAnchor: Vector3 | null = null;
   private readonly floatingNodePositions = new Map<string, Vector3>();
   private readonly nodeMeshes = new Map<string, Mesh<SphereGeometry, MeshStandardMaterial>>();
   private readonly linkMeshes = new Map<string, LinkVisualState>();
-  private readonly linkSegmentMaterials = new Map<string, MeshStandardMaterial>();
-  private readonly linkPacketMaterials = new Map<string, MeshStandardMaterial>();
   private readonly nodeGeometry = new SphereGeometry(
     1,
     NODE_SPHERE_WIDTH_SEGMENTS,
@@ -148,6 +149,27 @@ export class InfraSceneRenderer {
     this.recomputeLayout();
   }
 
+  setPreferredSpawnAnchor(anchor: Vector3 | null): void {
+    if (!anchor) {
+      if (!this.preferredSpawnAnchor) {
+        return;
+      }
+      this.preferredSpawnAnchor = null;
+      this.recomputeLayout();
+      return;
+    }
+
+    const next = this.preferredSpawnAnchor ?? new Vector3();
+    const dx = next.x - anchor.x;
+    const dy = next.y - anchor.y;
+    const dz = next.z - anchor.z;
+    next.copy(anchor);
+    this.preferredSpawnAnchor = next;
+    if (dx * dx + dy * dy + dz * dz > MARKER_LAYOUT_POSITION_EPSILON_SQ) {
+      this.recomputeLayout();
+    }
+  }
+
   tick(timeMs: number): void {
     const timeSec = timeMs / 1000;
     const dt = this.lastTickSec > 0 ? Math.min(timeSec - this.lastTickSec, 0.1) : 0;
@@ -205,6 +227,8 @@ export class InfraSceneRenderer {
     this.nodeMeshes.clear();
 
     for (const visual of this.linkMeshes.values()) {
+      visual.segmentMaterial.dispose();
+      visual.packetMaterial.dispose();
       this.linkGroup.remove(visual.group);
     }
     this.linkMeshes.clear();
@@ -219,14 +243,6 @@ export class InfraSceneRenderer {
     this.nodeGeometry.dispose();
     this.linkSegmentGeometry.dispose();
     this.packetGeometry.dispose();
-    for (const material of this.linkSegmentMaterials.values()) {
-      material.dispose();
-    }
-    this.linkSegmentMaterials.clear();
-    for (const material of this.linkPacketMaterials.values()) {
-      material.dispose();
-    }
-    this.linkPacketMaterials.clear();
     this.root.removeFromParent();
   }
 
@@ -250,6 +266,7 @@ export class InfraSceneRenderer {
           this.nodeGeometry,
           new MeshStandardMaterial({ color: selectNodeColor(node.health), roughness: 0.3, metalness: 0.1 })
         );
+        this.updateNodeMaterial(mesh.material, selectNodeColor(node.health));
         mesh.scale.setScalar(NODE_RADIUS);
         mesh.name = `node-${node.id}`;
         const metadata: SelectableMeta = {
@@ -263,7 +280,7 @@ export class InfraSceneRenderer {
         this.nodeGroup.add(mesh);
         this.nodeMeshes.set(node.id, mesh);
       } else {
-        mesh.material.color.set(selectNodeColor(node.health));
+        this.updateNodeMaterial(mesh.material, selectNodeColor(node.health));
       }
     }
   }
@@ -275,6 +292,8 @@ export class InfraSceneRenderer {
       if (nextIds.has(linkId)) {
         continue;
       }
+      visual.segmentMaterial.dispose();
+      visual.packetMaterial.dispose();
       visual.group.removeFromParent();
       this.linkMeshes.delete(linkId);
     }
@@ -293,7 +312,7 @@ export class InfraSceneRenderer {
           ...metadata
         };
 
-        const segmentMaterial = this.getSharedLinkSegmentMaterial(link.beamColorHex);
+        const segmentMaterial = this.createLinkSegmentMaterial(link.beamColorHex);
         const segments: Array<Mesh<CylinderGeometry, MeshStandardMaterial>> = [];
         for (let i = 0; i < LINK_SEGMENT_COUNT; i++) {
           const segment = new Mesh(
@@ -307,9 +326,10 @@ export class InfraSceneRenderer {
 
         const initialBeamRadius = Math.max(link.trafficRadius, MIN_LINK_BEAM_RADIUS);
         const initialPacketRadius = Math.max(MIN_PACKET_RADIUS, initialBeamRadius * 0.78);
+        const packetMaterial = this.createLinkPacketMaterial(link.beamColorHex);
         const packet = new Mesh(
           this.packetGeometry,
-          this.getSharedLinkPacketMaterial(link.beamColorHex)
+          packetMaterial
         );
 
         group.add(packet);
@@ -325,6 +345,8 @@ export class InfraSceneRenderer {
           group,
           segments,
           packet,
+          segmentMaterial,
+          packetMaterial,
           flowHz: link.flowHz,
           targetFlowHz: link.flowHz,
           beamRadius: link.trafficRadius,
@@ -338,16 +360,8 @@ export class InfraSceneRenderer {
         visual.targetBeamRadius = link.trafficRadius;
       }
 
-      const nextSegmentMaterial = this.getSharedLinkSegmentMaterial(link.beamColorHex);
-      for (const segment of visual.segments) {
-        if (segment.material !== nextSegmentMaterial) {
-          segment.material = nextSegmentMaterial;
-        }
-      }
-      const nextPacketMaterial = this.getSharedLinkPacketMaterial(link.beamColorHex);
-      if (visual.packet.material !== nextPacketMaterial) {
-        visual.packet.material = nextPacketMaterial;
-      }
+      this.updateLinkSegmentMaterial(visual.segmentMaterial, link.beamColorHex);
+      this.updateLinkPacketMaterial(visual.packetMaterial, link.beamColorHex);
     }
   }
 
@@ -430,7 +444,7 @@ export class InfraSceneRenderer {
     const floating: RenderNodeView[] = [];
 
     for (const node of nodes) {
-      if (this.markerAnchors.has(node.markerId)) {
+      if (this.resolveNodeAnchor(node)) {
         anchored.push(node);
       } else {
         floating.push(node);
@@ -438,7 +452,7 @@ export class InfraSceneRenderer {
     }
 
     for (const node of anchored) {
-      const position = this.markerAnchors.get(node.markerId);
+      const position = this.resolveNodeAnchor(node);
       if (position) {
         output.set(node.id, this.clampToBoundary(position));
       }
@@ -446,7 +460,7 @@ export class InfraSceneRenderer {
 
     const center = this.getPreferredCenter();
     const baseRadius = this.getPreferredRadius(center.x, center.z);
-    const centerY = 1.35;
+    const centerY = this.preferredSpawnAnchor?.y ?? 1.35;
     const count = Math.max(floating.length, 1);
 
     // Distribute across multiple rings; ~12 nodes per ring keeps them readable
@@ -475,6 +489,13 @@ export class InfraSceneRenderer {
   }
 
   private getPreferredCenter(): { x: number; z: number } {
+    if (this.preferredSpawnAnchor) {
+      return {
+        x: this.preferredSpawnAnchor.x,
+        z: this.preferredSpawnAnchor.z
+      };
+    }
+
     if (!this.boundaryPolygon || this.boundaryPolygon.length === 0) {
       return { x: 0, z: -1.2 };
     }
@@ -508,6 +529,17 @@ export class InfraSceneRenderer {
     const clamped = position.clone();
     this.clampToBoundaryInPlace(clamped);
     return clamped;
+  }
+
+  private resolveNodeAnchor(node: RenderNodeView): Vector3 | null {
+    const markerAnchor = this.markerAnchors.get(node.markerId);
+    if (markerAnchor) {
+      return markerAnchor;
+    }
+    if (node.markerId === 0 && this.preferredSpawnAnchor) {
+      return this.preferredSpawnAnchor;
+    }
+    return null;
   }
 
   private clampToBoundaryInPlace(position: Vector3): void {
@@ -548,34 +580,60 @@ export class InfraSceneRenderer {
     this.root.add(this.boundaryLoop);
   }
 
-  private getSharedLinkSegmentMaterial(colorHex: string): MeshStandardMaterial {
-    let material = this.linkSegmentMaterials.get(colorHex);
-    if (!material) {
-      material = new MeshStandardMaterial({
-        color: colorHex,
-        emissive: colorHex,
-        emissiveIntensity: 0.26,
-        metalness: 0.12,
-        roughness: 0.42
-      });
-      this.linkSegmentMaterials.set(colorHex, material);
-    }
+  private createLinkSegmentMaterial(colorHex: string): MeshStandardMaterial {
+    const material = new MeshStandardMaterial({
+      color: colorHex,
+      emissive: colorHex,
+      emissiveIntensity: 0.26,
+      metalness: 0.12,
+      roughness: 0.42
+    });
+    this.writeInteractionBaseline(material);
     return material;
   }
 
-  private getSharedLinkPacketMaterial(colorHex: string): MeshStandardMaterial {
-    let material = this.linkPacketMaterials.get(colorHex);
-    if (!material) {
-      material = new MeshStandardMaterial({
-        color: colorHex,
-        emissive: colorHex,
-        emissiveIntensity: 0.95,
-        metalness: 0.04,
-        roughness: 0.28
-      });
-      this.linkPacketMaterials.set(colorHex, material);
-    }
+  private createLinkPacketMaterial(colorHex: string): MeshStandardMaterial {
+    const material = new MeshStandardMaterial({
+      color: colorHex,
+      emissive: colorHex,
+      emissiveIntensity: 0.95,
+      metalness: 0.04,
+      roughness: 0.28
+    });
+    this.writeInteractionBaseline(material);
     return material;
+  }
+
+  private updateLinkSegmentMaterial(material: MeshStandardMaterial, colorHex: string): void {
+    material.color.set(colorHex);
+    material.emissive.set(colorHex);
+    material.emissiveIntensity = 0.26;
+    this.writeInteractionBaseline(material);
+  }
+
+  private updateLinkPacketMaterial(material: MeshStandardMaterial, colorHex: string): void {
+    material.color.set(colorHex);
+    material.emissive.set(colorHex);
+    material.emissiveIntensity = 0.95;
+    this.writeInteractionBaseline(material);
+  }
+
+  private updateNodeMaterial(material: MeshStandardMaterial, colorHex: string): void {
+    material.color.set(colorHex);
+    material.emissive.set(0x000000);
+    material.emissiveIntensity = 0;
+    this.writeInteractionBaseline(material);
+  }
+
+  private writeInteractionBaseline(material: MeshStandardMaterial): void {
+    material.userData = {
+      ...material.userData,
+      interactionBase: {
+        colorHex: material.color.getHex(),
+        emissiveHex: material.emissive.getHex(),
+        emissiveIntensity: material.emissiveIntensity,
+      },
+    };
   }
 }
 

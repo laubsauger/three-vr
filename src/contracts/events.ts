@@ -3,6 +3,7 @@ import type {
   Handedness,
   LinkMetricUpdate,
   NodeMetricUpdate,
+  QuaternionLike,
   TopologySnapshot,
   TrackedMarker,
   Vector3Like
@@ -66,6 +67,14 @@ export interface TrackingStatusEvent {
   timestampMs: number;
 }
 
+export interface SpawnAnchorEvent {
+  markerId: number | null;
+  position: Vector3Like | null;
+  rotation: QuaternionLike | null;
+  source: "desktop-prelock" | "xr-resolved" | "cleared";
+  timestampMs: number;
+}
+
 export interface AppEventMap {
   "xr/state": {
     state: XrRuntimeState;
@@ -81,6 +90,7 @@ export interface AppEventMap {
     timestampMs: number;
   };
   "tracking/status": TrackingStatusEvent;
+  "tracking/spawn-anchor": SpawnAnchorEvent;
   "topology/snapshot": {
     snapshot: TopologySnapshot;
     timestampMs: number;
