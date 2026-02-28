@@ -557,7 +557,21 @@ export async function bootstrapApp(): Promise<void> {
   cameraFeedMesh.name = "camera-feed";
   camera.add(cameraFeedMesh);
 
-  scene.add(ambient, keyLight, cameraPiPMesh);
+  const xrCompositionProbe = new Mesh(
+    new PlaneGeometry(0.11, 0.11),
+    new MeshBasicMaterial({
+      color: "#ff2bd6",
+      transparent: true,
+      opacity: 0.96,
+      depthTest: false,
+      depthWrite: false
+    })
+  );
+  xrCompositionProbe.visible = false;
+  xrCompositionProbe.renderOrder = 10_000;
+  xrCompositionProbe.name = "xr-composition-probe";
+
+  scene.add(ambient, keyLight, cameraPiPMesh, xrCompositionProbe);
 
   const xrRuntime = new XrRuntime(renderer);
   const isQuestBrowser = /OculusBrowser|Meta Quest|Quest/i.test(navigator.userAgent);
@@ -1124,10 +1138,25 @@ export async function bootstrapApp(): Promise<void> {
   const xrCameraPos = new Vector3();
   const xrCameraQuat = new Quaternion();
   const pipOffset = new Vector3(0.38, 0.23, -0.78);
+  const xrProbeOffset = new Vector3(0, 0, -0.45);
   const setDomCameraPiPVisible = (visible: boolean): void => {
     const display = visible ? "" : "none";
     cameraPiPLabel.style.display = display;
     cameraPiPCanvas.style.display = display;
+  };
+
+  const updateXrCompositionProbe = (inXrMode: boolean): void => {
+    xrCompositionProbe.visible = inXrMode;
+    if (!inXrMode) {
+      return;
+    }
+
+    const xrCamera = renderer.xr.getCamera();
+    xrCamera.getWorldPosition(xrCameraPos);
+    xrCamera.getWorldQuaternion(xrCameraQuat);
+    const worldOffset = xrProbeOffset.clone().applyQuaternion(xrCameraQuat);
+    xrCompositionProbe.position.copy(xrCameraPos).add(worldOffset);
+    xrCompositionProbe.quaternion.copy(xrCameraQuat);
   };
 
   const clearCameraPiPTexture = (): void => {
@@ -1232,6 +1261,7 @@ export async function bootstrapApp(): Promise<void> {
       if (cameraPiPCtx) {
         drawCameraPiP(cameraPiPCtx, cameraPiPCanvas, switchableDetector, cameraPiPLabel);
       }
+      updateXrCompositionProbe(false);
       updateInSceneCameraPiP(false);
 
       renderer.resetState();
@@ -1272,6 +1302,7 @@ export async function bootstrapApp(): Promise<void> {
     if (inScenePiPCtx) {
       drawCameraPiP(inScenePiPCtx, inScenePiPCanvas, switchableDetector, cameraPiPLabel);
     }
+    updateXrCompositionProbe(true);
     updateInSceneCameraPiP(true);
     renderer.resetState();
     renderer.render(scene, camera);
