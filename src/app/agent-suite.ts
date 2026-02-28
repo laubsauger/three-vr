@@ -25,6 +25,7 @@ export function createDefaultAgentSuite(options: DefaultAgentSuiteOptions): Agen
     rendering: createRenderingAgent({
       scene: options.scene,
       camera: options.camera,
+      renderer: options.renderer,
       kmlText: options.kmlText,
     }),
     interaction: createInteractionAgent({

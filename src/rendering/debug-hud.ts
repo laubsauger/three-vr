@@ -53,7 +53,7 @@ export class DebugHud {
   private readonly dragOffset = new Vector3();
 
   /** Offset from camera in "follow" mode (bottom-left corner). */
-  private readonly followOffset = new Vector3(-0.28, -0.18, -0.5);
+  private readonly followOffset = new Vector3(-0.18, -0.17, -0.5);
   private readonly tmpPos = new Vector3();
   private readonly tmpQuat = new Quaternion();
   private readonly tmpForward = new Vector3();
@@ -65,8 +65,8 @@ export class DebugHud {
 
   constructor() {
     this.canvas = document.createElement("canvas");
-    this.canvas.width = 256;
-    this.canvas.height = 200;
+    this.canvas.width = 220;
+    this.canvas.height = 184;
     this.ctx = this.canvas.getContext("2d")!;
 
     this.texture = new CanvasTexture(this.canvas);
@@ -77,7 +77,7 @@ export class DebugHud {
     });
     this.sprite = new Sprite(material);
     this.sprite.name = "debug-hud";
-    this.sprite.scale.set(0.22, 0.154, 1);
+    this.sprite.scale.set(0.19, 0.159, 1);
 
     this.drawEmpty();
   }

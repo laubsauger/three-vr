@@ -60,36 +60,115 @@ export async function bootstrapApp(): Promise<void> {
     throw new Error("Missing #app root element.");
   }
 
+  const isVrUi = window.matchMedia("(pointer: coarse)").matches;
   const wrapper = document.createElement("div");
   wrapper.style.fontFamily = "ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif";
-  wrapper.style.padding = "12px";
+  wrapper.style.padding = isVrUi ? "16px" : "14px";
   wrapper.style.color = "#dbe5e8";
-  wrapper.style.background = "linear-gradient(160deg, #0a1014 0%, #101f26 100%)";
+  wrapper.style.background = "radial-gradient(circle at top right, rgba(42, 112, 134, 0.18), transparent 34%), linear-gradient(160deg, #0a1014 0%, #101f26 58%, #0d171c 100%)";
   wrapper.style.minHeight = "100vh";
   wrapper.style.boxSizing = "border-box";
+  wrapper.style.maxWidth = "1220px";
+  wrapper.style.margin = "0 auto";
+  wrapper.style.display = "grid";
+  wrapper.style.gap = isVrUi ? "12px" : "10px";
 
   const toolbar = document.createElement("div");
-  const isVrUi = window.matchMedia("(pointer: coarse)").matches;
   toolbar.style.display = "flex";
-  toolbar.style.gap = isVrUi ? "12px" : "8px";
+  toolbar.style.gap = isVrUi ? "12px" : "10px";
   toolbar.style.flexWrap = "wrap";
-  toolbar.style.marginBottom = "8px";
+  toolbar.style.padding = isVrUi ? "10px" : "8px";
+  toolbar.style.borderRadius = "14px";
+  toolbar.style.background = "rgba(7, 14, 18, 0.74)";
+  toolbar.style.border = "1px solid rgba(84, 126, 138, 0.34)";
+  toolbar.style.backdropFilter = "blur(10px)";
 
   const applyControlButtonStyle = (
     button: HTMLButtonElement,
     options: { border: string; background: string; emphasis?: boolean }
   ): void => {
-    button.style.padding = isVrUi ? "14px 20px" : "8px 12px";
-    button.style.minHeight = isVrUi ? "56px" : "36px";
-    button.style.minWidth = isVrUi ? (options.emphasis ? "240px" : "170px") : "0";
-    button.style.fontSize = isVrUi ? (options.emphasis ? "19px" : "16px") : "14px";
+    button.style.padding = isVrUi ? "16px 22px" : (options.emphasis ? "12px 18px" : "10px 14px");
+    button.style.minHeight = isVrUi ? "64px" : (options.emphasis ? "46px" : "42px");
+    button.style.minWidth = isVrUi ? (options.emphasis ? "248px" : "182px") : (options.emphasis ? "168px" : "138px");
+    button.style.fontSize = isVrUi ? (options.emphasis ? "19px" : "16px") : (options.emphasis ? "15px" : "13px");
     button.style.fontWeight = options.emphasis ? "700" : "600";
-    button.style.borderRadius = isVrUi ? "12px" : "8px";
+    button.style.borderRadius = isVrUi ? "14px" : "10px";
     button.style.border = options.border;
     button.style.background = options.background;
     button.style.color = "white";
     button.style.cursor = "pointer";
     button.style.touchAction = "manipulation";
+    button.style.boxShadow = "inset 0 1px 0 rgba(255,255,255,0.06)";
+    button.style.letterSpacing = "0.02em";
+  };
+
+  const createInfoCard = (
+    title: string,
+    options: { collapsible?: boolean; collapsed?: boolean } = {}
+  ): {
+    card: HTMLDivElement;
+    body: HTMLDivElement;
+    setCollapsed: (collapsed: boolean) => void;
+  } => {
+    const card = document.createElement("div");
+    card.style.display = "grid";
+    card.style.gap = "8px";
+    card.style.padding = isVrUi ? "12px" : "10px";
+    card.style.borderRadius = "14px";
+    card.style.background = "rgba(7, 14, 18, 0.7)";
+    card.style.border = "1px solid rgba(84, 126, 138, 0.28)";
+    card.style.boxShadow = "inset 0 1px 0 rgba(255,255,255,0.04)";
+
+    const header = document.createElement("div");
+    header.style.display = "flex";
+    header.style.alignItems = "center";
+    header.style.justifyContent = "space-between";
+    header.style.gap = "10px";
+
+    const heading = document.createElement("div");
+    heading.textContent = title;
+    heading.style.fontSize = "11px";
+    heading.style.fontWeight = "700";
+    heading.style.letterSpacing = "0.08em";
+    heading.style.textTransform = "uppercase";
+    heading.style.color = "#8eb6c1";
+    heading.style.opacity = "0.92";
+    header.append(heading);
+
+    const body = document.createElement("div");
+    body.style.display = "grid";
+    body.style.gap = "6px";
+
+    let toggleButton: HTMLButtonElement | null = null;
+    const setCollapsed = (collapsed: boolean): void => {
+      body.style.display = collapsed ? "none" : "grid";
+      if (toggleButton) {
+        toggleButton.textContent = collapsed ? "Show" : "Hide";
+      }
+    };
+
+    if (options.collapsible) {
+      toggleButton = document.createElement("button");
+      toggleButton.type = "button";
+      toggleButton.style.padding = isVrUi ? "8px 12px" : "4px 8px";
+      toggleButton.style.minHeight = isVrUi ? "36px" : "24px";
+      toggleButton.style.borderRadius = "999px";
+      toggleButton.style.border = "1px solid rgba(92, 128, 138, 0.32)";
+      toggleButton.style.background = "rgba(11, 22, 28, 0.7)";
+      toggleButton.style.color = "#8eb6c1";
+      toggleButton.style.fontSize = isVrUi ? "12px" : "11px";
+      toggleButton.style.fontWeight = "700";
+      toggleButton.style.cursor = "pointer";
+      toggleButton.style.touchAction = "manipulation";
+      toggleButton.addEventListener("click", () => {
+        setCollapsed(body.style.display !== "none");
+      });
+      header.append(toggleButton);
+    }
+
+    card.append(header, body);
+    setCollapsed(Boolean(options.collapsed));
+    return { card, body, setCollapsed };
   };
 
   const startButton = document.createElement("button");
@@ -132,7 +211,10 @@ export async function bootstrapApp(): Promise<void> {
   filterBar.style.display = "flex";
   filterBar.style.gap = isVrUi ? "10px" : "6px";
   filterBar.style.flexWrap = "wrap";
-  filterBar.style.marginBottom = "8px";
+  filterBar.style.padding = isVrUi ? "8px 10px" : "6px 8px";
+  filterBar.style.borderRadius = "12px";
+  filterBar.style.background = "rgba(10, 18, 22, 0.56)";
+  filterBar.style.border = "1px solid rgba(62, 88, 96, 0.26)";
 
   const filterModes: { label: string; mode: TopologyFilterMode }[] = [
     { label: "All", mode: "all" },
@@ -152,7 +234,7 @@ export async function bootstrapApp(): Promise<void> {
       background: mode === "all" ? "#1a5568" : "#1a2428",
     });
     btn.style.fontSize = isVrUi ? "14px" : "12px";
-    btn.style.padding = isVrUi ? "10px 16px" : "5px 10px";
+    btn.style.padding = isVrUi ? "11px 16px" : "7px 10px";
     btn.style.minHeight = isVrUi ? "44px" : "28px";
     btn.style.minWidth = "0";
     return btn;
@@ -183,17 +265,18 @@ export async function bootstrapApp(): Promise<void> {
 
   const stateLabel = document.createElement("div");
   stateLabel.style.fontSize = "14px";
-  stateLabel.style.padding = "8px 0";
+  stateLabel.style.fontWeight = "700";
   stateLabel.textContent = toLabel("idle");
 
   const capabilitiesLabel = document.createElement("pre");
   capabilitiesLabel.style.margin = "0";
   capabilitiesLabel.style.padding = "8px";
-  capabilitiesLabel.style.background = "rgba(9, 16, 21, 0.6)";
-  capabilitiesLabel.style.border = "1px solid rgba(90, 129, 140, 0.4)";
+  capabilitiesLabel.style.background = "rgba(9, 16, 21, 0.48)";
+  capabilitiesLabel.style.border = "1px solid rgba(90, 129, 140, 0.24)";
   capabilitiesLabel.style.borderRadius = "8px";
   capabilitiesLabel.style.whiteSpace = "pre-wrap";
   capabilitiesLabel.style.fontSize = "12px";
+  capabilitiesLabel.style.maxWidth = "320px";
 
   const frameStats = document.createElement("div");
   frameStats.style.fontSize = "12px";
@@ -265,10 +348,10 @@ export async function bootstrapApp(): Promise<void> {
   cameraPiPLabel.textContent = "Camera PiP: no frame";
 
   const cameraPiPCanvas = document.createElement("canvas");
-  cameraPiPCanvas.width = 320;
-  cameraPiPCanvas.height = 180;
-  cameraPiPCanvas.style.width = "320px";
-  cameraPiPCanvas.style.height = "180px";
+  cameraPiPCanvas.width = 280;
+  cameraPiPCanvas.height = 158;
+  cameraPiPCanvas.style.width = "280px";
+  cameraPiPCanvas.style.height = "158px";
   cameraPiPCanvas.style.maxWidth = "100%";
   cameraPiPCanvas.style.borderRadius = "8px";
   cameraPiPCanvas.style.border = "1px solid rgba(88, 131, 144, 0.45)";
@@ -281,33 +364,33 @@ export async function bootstrapApp(): Promise<void> {
   selectionStatsLabel.textContent = "Selection: none";
 
   const canvasHolder = document.createElement("div");
-  canvasHolder.style.borderRadius = "12px";
+  canvasHolder.style.borderRadius = "16px";
   canvasHolder.style.overflow = "hidden";
-  canvasHolder.style.border = "1px solid rgba(92, 128, 138, 0.4)";
+  canvasHolder.style.border = "1px solid rgba(92, 128, 138, 0.34)";
   canvasHolder.style.position = "relative";
+  canvasHolder.style.background = "rgba(4, 9, 12, 0.45)";
+  canvasHolder.style.boxShadow = "0 14px 34px rgba(0, 0, 0, 0.24)";
+
+  const statusGrid = document.createElement("div");
+  statusGrid.style.display = "grid";
+  statusGrid.style.gridTemplateColumns = "repeat(auto-fit, minmax(240px, 1fr))";
+  statusGrid.style.gap = isVrUi ? "12px" : "10px";
+  statusGrid.style.alignItems = "start";
+
+  const sessionCard = createInfoCard("Session");
+  const anchorCard = createInfoCard("Anchoring");
+  const cameraCard = createInfoCard("Camera", { collapsible: true });
+  const telemetryCard = createInfoCard("Topology", { collapsible: true, collapsed: !isVrUi });
+
+  sessionCard.body.append(stateLabel, frameStats, trackingStats, trackingBackendLabel, selectionStatsLabel);
+  anchorCard.body.append(spawnAnchorLabel, calibrationLabel, calibrationPanel);
+  cameraCard.body.append(cameraStatsLabel, cameraPermissionLabel, xrCameraAccessLabel, cameraPiPLabel, cameraPiPCanvas);
+  telemetryCard.body.append(topologyStatsLabel, telemetryStatsLabel, capabilitiesLabel);
+
+  statusGrid.append(sessionCard.card, anchorCard.card, cameraCard.card, telemetryCard.card);
 
   toolbar.append(startButton, stopButton, cameraTrackButton, mockToggle, xrEntryModeToggle, stressToggle);
-  wrapper.append(
-    toolbar,
-    filterBar,
-    stateLabel,
-    frameStats,
-    trackingStats,
-    trackingBackendLabel,
-    calibrationLabel,
-    spawnAnchorLabel,
-    calibrationPanel,
-    topologyStatsLabel,
-    telemetryStatsLabel,
-    cameraStatsLabel,
-    cameraPermissionLabel,
-    xrCameraAccessLabel,
-    cameraPiPLabel,
-    cameraPiPCanvas,
-    selectionStatsLabel,
-    capabilitiesLabel,
-    canvasHolder
-  );
+  wrapper.append(toolbar, filterBar, statusGrid, canvasHolder);
   root.append(wrapper);
 
   const scene = new Scene();
@@ -334,7 +417,7 @@ export async function bootstrapApp(): Promise<void> {
   keyLight.position.set(2, 4, 3);
 
   const cameraPiPMesh = new Mesh(
-    new PlaneGeometry(0.46, 0.26),
+    new PlaneGeometry(0.38, 0.214),
     new MeshBasicMaterial({
       color: 0xffffff,
       transparent: true,
@@ -342,7 +425,7 @@ export async function bootstrapApp(): Promise<void> {
     })
   );
   cameraPiPMesh.visible = false;
-  cameraPiPMesh.position.set(0.55, 1.55, -1.05);
+  cameraPiPMesh.position.set(0.72, 1.66, -1.18);
   cameraPiPMesh.name = "camera-pip";
 
   const cameraFeedMesh = new Mesh(
@@ -694,7 +777,7 @@ export async function bootstrapApp(): Promise<void> {
   let cameraPiPTexture: CanvasTexture | null = null;
   const xrCameraPos = new Vector3();
   const xrCameraQuat = new Quaternion();
-  const pipOffset = new Vector3(0.30, 0.17, -0.65);
+  const pipOffset = new Vector3(0.38, 0.23, -0.78);
 
   const clearCameraPiPTexture = (): void => {
     if (!cameraPiPTexture) {
@@ -726,49 +809,7 @@ export async function bootstrapApp(): Promise<void> {
   };
 
   const updateDesktopCameraFeed = (): void => {
-    if (!desktopTrackingActive || switchableDetector.getMode() !== "camera") {
-      clearDesktopCameraFeed();
-      return;
-    }
-
-    const video = switchableDetector.camera.getVideo();
-    if (!video || video.readyState < 2) {
-      clearDesktopCameraFeed();
-      return;
-    }
-
-    if (!videoTexture) {
-      videoTexture = new VideoTexture(video);
-      const material = cameraFeedMesh.material;
-      if (material instanceof MeshBasicMaterial) {
-        material.map = videoTexture;
-        material.needsUpdate = true;
-      }
-    }
-
-    videoTexture.needsUpdate = true;
-    scene.background = defaultBackground;
-
-    const distance = 0.05;
-    const fovYRad = (camera.fov * Math.PI) / 180;
-    const viewHeight = 2 * distance * Math.tan(fovYRad * 0.5);
-    const viewWidth = viewHeight * camera.aspect;
-    const videoAspect =
-      video.videoWidth > 0 && video.videoHeight > 0
-        ? video.videoWidth / video.videoHeight
-        : switchableDetector.camera.getOverlayData().width /
-        Math.max(1, switchableDetector.camera.getOverlayData().height);
-
-    let planeWidth = viewWidth;
-    let planeHeight = planeWidth / Math.max(videoAspect, 0.0001);
-    if (planeHeight > viewHeight) {
-      planeHeight = viewHeight;
-      planeWidth = planeHeight * videoAspect;
-    }
-
-    cameraFeedMesh.position.set(0, 0, -distance);
-    cameraFeedMesh.scale.set(planeWidth, planeHeight, 1);
-    cameraFeedMesh.visible = true;
+    clearDesktopCameraFeed();
   };
 
   const ensureCameraPiPCanvasTexture = (): void => {
@@ -811,13 +852,14 @@ export async function bootstrapApp(): Promise<void> {
       cameraPiPMesh.position.copy(xrCameraPos).add(worldOffset);
       cameraPiPMesh.quaternion.copy(xrCameraQuat);
     } else {
-      cameraPiPMesh.position.set(0.55, 1.55, -1.05);
+      cameraPiPMesh.position.set(0.72, 1.66, -1.18);
       cameraPiPMesh.quaternion.identity();
     }
   };
 
   const desktopLoop = (time: number): void => {
     if (xrRuntime.getState() !== "running") {
+      scene.background = defaultBackground;
       const deltaMs = lastDesktopFrameTime === 0 ? 0 : time - lastDesktopFrameTime;
       lastDesktopFrameTime = time;
       if (deltaMs > 0) {
@@ -848,6 +890,7 @@ export async function bootstrapApp(): Promise<void> {
   desktopLoopHandle = window.requestAnimationFrame(desktopLoop);
 
   xrRuntime.subscribeFrame((tick) => {
+    scene.background = null;
     if (tick.deltaMs > 0) {
       xrPerformance.recordFrame(tick.time, tick.deltaMs);
     }
@@ -1051,6 +1094,7 @@ export async function bootstrapApp(): Promise<void> {
 
       pendingXrSpawnAnchorResolve = xrEntryMode === "prelock" && Boolean(lockedSpawnAnchor);
       await startArSessionWithCameraAccessProbe();
+      scene.background = null;
       clearDesktopCameraFeed();
       if (desktopLoopHandle) {
         window.cancelAnimationFrame(desktopLoopHandle);
@@ -1069,6 +1113,7 @@ export async function bootstrapApp(): Promise<void> {
   stopButton.addEventListener("click", async () => {
     try {
       await xrRuntime.stop();
+      scene.background = defaultBackground;
       if (!desktopLoopHandle) {
         lastDesktopFrameTime = 0;
         desktopLoopHandle = window.requestAnimationFrame(desktopLoop);
@@ -1140,9 +1185,8 @@ export async function bootstrapApp(): Promise<void> {
     }
   });
 
-  let stressActive = false;
-  stressToggle.addEventListener("click", () => {
-    stressActive = !stressActive;
+  let stressActive = true;
+  const applyStressState = (): void => {
     if (stressActive) {
       stressToggle.textContent = "Stress: On (KML)";
       stressToggle.style.border = "1px solid #a83e8f";
@@ -1152,14 +1196,18 @@ export async function bootstrapApp(): Promise<void> {
         snapshot: stressSnapshot,
         timestampMs: performance.now(),
       });
-    } else {
-      stressToggle.textContent = "Stress: Off";
-      stressToggle.style.border = "1px solid #6a3a6a";
-      stressToggle.style.background = "#3f1f3f";
-      // Re-emit the normal topology by triggering a fresh load
-      // The topology agent will re-emit on next telemetry tick
-      topologyStatsLabel.textContent = "Topology: reloading demo data...";
+      return;
     }
+
+    stressToggle.textContent = "Stress: Off";
+    stressToggle.style.border = "1px solid #6a3a6a";
+    stressToggle.style.background = "#3f1f3f";
+    topologyStatsLabel.textContent = "Topology: reloading demo data...";
+  };
+
+  stressToggle.addEventListener("click", () => {
+    stressActive = !stressActive;
+    applyStressState();
   });
 
   window.addEventListener("resize", () => {
@@ -1182,6 +1230,7 @@ export async function bootstrapApp(): Promise<void> {
   });
 
   setState();
+  applyStressState();
 }
 
 function renderCalibrationPanel(

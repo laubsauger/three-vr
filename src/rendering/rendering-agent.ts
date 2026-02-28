@@ -1,4 +1,4 @@
-import { Camera, Quaternion, Scene, Vector3 } from "three";
+import { Camera, Quaternion, Scene, Vector3, WebGLRenderer } from "three";
 
 import type { IntegrationContext, RenderingAgent } from "../contracts/integration";
 import { selectRenderGraphView } from "../topology";
@@ -13,6 +13,7 @@ import type { DebugHudData } from "./debug-hud";
 export interface RenderingAgentOptions {
   scene: Scene;
   camera: Camera;
+  renderer: WebGLRenderer;
   /** Raw KML text to load as a map overlay. */
   kmlText?: string;
 }
@@ -32,7 +33,7 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
   options.scene.add(debugHud.sprite);
 
   // Position debug HUD in bottom-left (updated per-frame via camera follow)
-  debugHud.sprite.position.set(-0.35, 1.15, -0.8);
+  debugHud.sprite.position.set(-0.24, 1.15, -0.8);
 
   let unsubscribeTopology: (() => void) | null = null;
   let unsubscribeMarkers: (() => void) | null = null;
@@ -60,6 +61,9 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
   const lockedSpawnPos = new Vector3();
   const lockedSpawnQuat = new Quaternion();
   const pinchPoint = new Vector3();
+  const getViewCamera = (): Camera => (
+    xrRunning ? options.renderer.xr.getCamera() : options.camera
+  );
 
   // Debug HUD state
   const hudData: DebugHudData = {
@@ -86,13 +90,14 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
   };
 
   const animate = (timeMs: number): void => {
+    const viewCamera = getViewCamera();
     if (!xrRunning) {
       renderer.tick(timeMs);
     }
-    labelManager.updateVisibility(options.camera);
-    handVisualizer.update(options.camera);
+    labelManager.updateVisibility(viewCamera);
+    handVisualizer.update(viewCamera);
     // Keep HUD position locked to camera every frame (including desktop)
-    debugHud.update(hudData, timeMs, options.camera);
+    debugHud.update(hudData, timeMs, viewCamera);
     animationHandle = window.requestAnimationFrame(animate);
   };
 
@@ -107,7 +112,7 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
           const nodePositions = renderer.getNodePositions();
           const linkMidpoints = renderer.getLinkMidpoints();
           labelManager.updateGraph(graph, nodePositions, linkMidpoints);
-          labelManager.updateVisibility(options.camera);
+          labelManager.updateVisibility(getViewCamera());
         });
 
         unsubscribeMarkers = context.events.on("tracking/markers", (payload) => {
@@ -191,13 +196,14 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
         });
 
         unsubscribeXrFrame = context.events.on("xr/frame", (payload) => {
+          const viewCamera = getViewCamera();
           if (xrRunning) {
             renderer.tick(payload.time);
           }
-          labelManager.updateVisibility(options.camera);
-          handVisualizer.update(options.camera);
+          labelManager.updateVisibility(viewCamera);
+          handVisualizer.update(viewCamera);
           hudData.hudMode = debugHud.mode;
-          debugHud.update(hudData, payload.time, options.camera);
+          debugHud.update(hudData, payload.time, viewCamera);
         });
 
         unsubscribePerformance = context.events.on("app/performance", (payload) => {
@@ -221,8 +227,9 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
         });
 
         unsubscribeHands = context.events.on("interaction/hands", (payload) => {
+          const viewCamera = getViewCamera();
           handVisualizer.setHands(payload.hands);
-          handVisualizer.update(options.camera);
+          handVisualizer.update(viewCamera);
           if (hudDragHand) {
             const dragHand = payload.hands.find((hand) => hand.hand === hudDragHand && hand.pinching);
             if (dragHand) {
@@ -231,7 +238,7 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
                 dragHand.pinchPoint.y,
                 dragHand.pinchPoint.z,
               );
-              debugHud.dragTo(pinchPoint, options.camera);
+              debugHud.dragTo(pinchPoint, viewCamera);
             } else {
               debugHud.endDrag();
               hudDragHand = null;
@@ -266,10 +273,11 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
             return;
           }
 
+          const viewCamera = getViewCamera();
           pinchPoint.set(payload.position.x, payload.position.y, payload.position.z);
 
           if (payload.state === "start") {
-            if (debugHud.beginDrag(pinchPoint, options.camera)) {
+            if (debugHud.beginDrag(pinchPoint, viewCamera)) {
               hudDragHand = "left";
             }
           } else if (hudDragHand === "left") {

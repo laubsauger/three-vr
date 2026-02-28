@@ -26,6 +26,9 @@ const MIN_LINK_BEAM_RADIUS = 0.003;
 const MIN_PACKET_RADIUS = 0.008;
 const MARKER_LAYOUT_POSITION_EPSILON_SQ = 0.0004;
 const MARKER_LAYOUT_MIN_INTERVAL_MS = 80;
+const MAX_KML_LAYOUT_RADIUS_NO_BOUNDARY = 1.25;
+const MIN_KML_LAYOUT_RADIUS = 0.45;
+const KML_LAYOUT_BOUNDARY_PADDING = 0.86;
 
 interface LinkVisualState {
   group: Group;
@@ -448,22 +451,16 @@ export class InfraSceneRenderer {
 
   private resolveNodePositions(nodes: RenderNodeView[]): Map<string, Vector3> {
     const output = new Map<string, Vector3>();
-    const anchored: RenderNodeView[] = [];
     const floating: RenderNodeView[] = [];
+    const kmlLayoutScale = this.getKmlLayoutScale(nodes);
 
     for (const node of nodes) {
-      if (this.resolveNodeAnchor(node)) {
-        anchored.push(node);
-      } else {
-        floating.push(node);
-      }
-    }
-
-    for (const node of anchored) {
-      const position = this.resolveNodeAnchor(node);
+      const position = this.resolveNodeAnchor(node, kmlLayoutScale);
       if (position) {
         output.set(node.id, this.clampToBoundary(position));
+        continue;
       }
+      floating.push(node);
     }
 
     const center = this.getPreferredCenter();
@@ -494,6 +491,38 @@ export class InfraSceneRenderer {
     });
 
     return output;
+  }
+
+  private getKmlLayoutScale(nodes: RenderNodeView[]): number {
+    if (!this.preferredSpawnAnchor) {
+      return 1;
+    }
+
+    let maxRadius = 0;
+    for (const node of nodes) {
+      if (!node.layoutOffsetMeters) {
+        continue;
+      }
+      const radius = Math.hypot(node.layoutOffsetMeters.x, node.layoutOffsetMeters.z);
+      if (radius > maxRadius) {
+        maxRadius = radius;
+      }
+    }
+
+    if (maxRadius < 0.001) {
+      return 1;
+    }
+
+    const center = this.getPreferredCenter();
+    const targetRadius =
+      this.boundaryPolygon && this.boundaryPolygon.length >= 3
+        ? Math.max(
+            MIN_KML_LAYOUT_RADIUS,
+            this.getPreferredRadius(center.x, center.z) * KML_LAYOUT_BOUNDARY_PADDING
+          )
+        : MAX_KML_LAYOUT_RADIUS_NO_BOUNDARY;
+
+    return Math.min(1, targetRadius / maxRadius);
   }
 
   private getPreferredCenter(): { x: number; z: number } {
@@ -539,16 +568,16 @@ export class InfraSceneRenderer {
     return clamped;
   }
 
-  private resolveNodeAnchor(node: RenderNodeView): Vector3 | null {
+  private resolveNodeAnchor(node: RenderNodeView, kmlLayoutScale = 1): Vector3 | null {
     const markerAnchor = this.markerAnchors.get(node.markerId);
     if (markerAnchor) {
       return markerAnchor;
     }
     if (this.preferredSpawnAnchor && node.layoutOffsetMeters) {
       this.tmpLayout.set(
-        node.layoutOffsetMeters.x,
-        node.layoutOffsetMeters.y,
-        node.layoutOffsetMeters.z
+        node.layoutOffsetMeters.x * kmlLayoutScale,
+        node.layoutOffsetMeters.y * kmlLayoutScale,
+        node.layoutOffsetMeters.z * kmlLayoutScale
       );
       if (this.preferredSpawnRotation) {
         this.tmpLayout.applyQuaternion(this.preferredSpawnRotation);
