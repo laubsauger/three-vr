@@ -106,6 +106,7 @@ export class CameraWorkerMarkerDetector implements MarkerDetector {
   private readonly minCaptureDeltaMs: number;
   private readonly staleThresholdMs: number;
   private userMediaPreference: UserMediaPreference = "default";
+  private inlineCameraEnabled = true;
 
   private worker: Worker | null = null;
   private stream: MediaStream | null = null;
@@ -156,7 +157,13 @@ export class CameraWorkerMarkerDetector implements MarkerDetector {
     this.ensureProcessingResources();
 
     const xrFrameCaptureReady = this.canUseXrCameraFrame(_frame, _referenceSpace);
-    if (!xrFrameCaptureReady && !this.stream && !this.isStarting && !this.startFailed) {
+    if (
+      this.inlineCameraEnabled &&
+      !xrFrameCaptureReady &&
+      !this.stream &&
+      !this.isStarting &&
+      !this.startFailed
+    ) {
       void this.startUserMedia();
     }
 
@@ -219,6 +226,18 @@ export class CameraWorkerMarkerDetector implements MarkerDetector {
     this.userMediaPreference = preference;
   }
 
+  setInlineCameraEnabled(enabled: boolean): void {
+    if (this.inlineCameraEnabled === enabled) {
+      return;
+    }
+
+    this.inlineCameraEnabled = enabled;
+    if (!enabled) {
+      this.stopUserMedia();
+      this.startFailed = false;
+    }
+  }
+
   setXrGlContext(gl: WebGLRenderingContext | WebGL2RenderingContext | null): void {
     if (this.xrGl === gl) {
       return;
@@ -279,24 +298,14 @@ export class CameraWorkerMarkerDetector implements MarkerDetector {
   }
 
   async restartUserMedia(): Promise<void> {
+    if (!this.inlineCameraEnabled) {
+      return;
+    }
     if (this.isStarting) {
       return;
     }
 
-    this.detachTrackDiagnostics();
-    if (this.stream) {
-      for (const track of this.stream.getTracks()) {
-        track.stop();
-      }
-      this.stream = null;
-    }
-    if (this.video) {
-      this.video.srcObject = null;
-      this.video.remove();
-      this.video = null;
-    }
-    this.videoTrack = null;
-    this.imageCapture = null;
+    this.stopUserMedia();
     this.trackDiagnostics = createDefaultTrackDiagnostics();
     if (!this.xrCameraActive) {
       this.captureBackend = "video";
@@ -329,18 +338,7 @@ export class CameraWorkerMarkerDetector implements MarkerDetector {
     this.xrReadback = null;
     this.xrBinding = null;
     this.xrBindingSession = null;
-    if (this.stream) {
-      for (const track of this.stream.getTracks()) {
-        track.stop();
-      }
-      this.stream = null;
-    }
-
-    if (this.video) {
-      this.video.srcObject = null;
-      this.video.remove();
-      this.video = null;
-    }
+    this.stopUserMedia();
 
     this.canvas = null;
     this.context2d = null;
@@ -357,6 +355,25 @@ export class CameraWorkerMarkerDetector implements MarkerDetector {
     this.lastFrameCapturedAtMs = 0;
     this.xrCameraActive = false;
     this.workerBusy = false;
+  }
+
+  private stopUserMedia(): void {
+    this.detachTrackDiagnostics();
+    if (this.stream) {
+      for (const track of this.stream.getTracks()) {
+        track.stop();
+      }
+      this.stream = null;
+    }
+
+    if (this.video) {
+      this.video.srcObject = null;
+      this.video.remove();
+      this.video = null;
+    }
+
+    this.videoTrack = null;
+    this.imageCapture = null;
   }
 
   private ensureProcessingResources(): void {

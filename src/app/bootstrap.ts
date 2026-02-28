@@ -57,7 +57,7 @@ interface StyleSnapshot {
 }
 
 type CameraPermissionState = PermissionState | "unsupported" | "unknown";
-type XrCameraAccessState = "unknown" | "probing" | "required" | "fallback";
+type XrCameraAccessState = "unknown" | "probing" | "required" | "fallback" | "standard";
 type XrEntryMode = "prelock" | "passthrough";
 
 export async function bootstrapApp(): Promise<void> {
@@ -513,6 +513,11 @@ export async function bootstrapApp(): Promise<void> {
       xrCameraAccessLabel.style.color = "#7be2b1";
       return;
     }
+    if (state === "standard") {
+      xrCameraAccessLabel.textContent = "XR camera-access: not requested (standard AR passthrough)";
+      xrCameraAccessLabel.style.color = "#7fd8cf";
+      return;
+    }
     if (state === "fallback") {
       xrCameraAccessLabel.textContent = detail
         ? `XR camera-access: unavailable, using getUserMedia fallback (${detail})`
@@ -651,45 +656,59 @@ export async function bootstrapApp(): Promise<void> {
         mode: "immersive-ar",
         domOverlayRoot: wrapper,
         referenceSpaceOrder: handheldReferenceSpaceOrder,
-        requiredFeatures: ["camera-access"],
+        requiredFeatures: [],
         optionalFeatures: baseOptionalFeatures
       });
-      setXrCameraAccessLabel("required");
+      setXrCameraAccessLabel("standard");
       return;
-    } catch (primaryError) {
-      const primaryDetails = primaryError instanceof Error ? primaryError.message : String(primaryError);
-      const compactReason = /\bcamera-access\b/i.test(primaryDetails)
-        ? "camera-access rejected"
-        : "probe failed";
+    } catch (standardError) {
+      const standardDetails = standardError instanceof Error ? standardError.message : String(standardError);
 
       try {
         await xrRuntime.start({
           mode: "immersive-ar",
           domOverlayRoot: wrapper,
           referenceSpaceOrder: handheldReferenceSpaceOrder,
-          requiredFeatures: [],
-          optionalFeatures: [...baseOptionalFeatures, "camera-access"]
+          requiredFeatures: ["camera-access"],
+          optionalFeatures: baseOptionalFeatures
         });
-        setXrCameraAccessLabel("fallback", compactReason);
+        setXrCameraAccessLabel("required");
         return;
-      } catch (fallbackError) {
-        const fallbackDetails = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
+      } catch (primaryError) {
+        const primaryDetails = primaryError instanceof Error ? primaryError.message : String(primaryError);
+        const compactReason = /\bcamera-access\b/i.test(primaryDetails)
+          ? "camera-access rejected"
+          : "probe failed";
 
         try {
           await xrRuntime.start({
             mode: "immersive-ar",
+            domOverlayRoot: wrapper,
             referenceSpaceOrder: handheldReferenceSpaceOrder,
             requiredFeatures: [],
             optionalFeatures: [...baseOptionalFeatures, "camera-access"]
           });
-          setXrCameraAccessLabel("fallback", "dom-overlay disabled");
+          setXrCameraAccessLabel("fallback", compactReason);
           return;
-        } catch (finalError) {
-          setXrCameraAccessLabel("unknown");
-          const finalDetails = finalError instanceof Error ? finalError.message : String(finalError);
-          throw new Error(
-            `camera-access probe failed (${primaryDetails}); fallback failed (${fallbackDetails}); final fallback failed (${finalDetails})`
-          );
+        } catch (fallbackError) {
+          const fallbackDetails = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
+
+          try {
+            await xrRuntime.start({
+              mode: "immersive-ar",
+              referenceSpaceOrder: handheldReferenceSpaceOrder,
+              requiredFeatures: [],
+              optionalFeatures: [...baseOptionalFeatures, "camera-access"]
+            });
+            setXrCameraAccessLabel("fallback", "dom-overlay disabled");
+            return;
+          } catch (finalError) {
+            setXrCameraAccessLabel("unknown");
+            const finalDetails = finalError instanceof Error ? finalError.message : String(finalError);
+            throw new Error(
+              `standard immersive-ar failed (${standardDetails}); camera-access probe failed (${primaryDetails}); fallback failed (${fallbackDetails}); final fallback failed (${finalDetails})`
+            );
+          }
         }
       }
     }
@@ -792,6 +811,8 @@ export async function bootstrapApp(): Promise<void> {
   });
   const shouldUseHandheldScreenFallback = (): boolean =>
     canUseHandheldScreenFallback && capabilities?.immersiveAr !== "supported";
+  const shouldUseNativeMobileAr = (): boolean =>
+    isVrUi && !isQuestBrowser && capabilities?.immersiveAr === "supported";
 
   const refreshStartButtonState = (): void => {
     const state = xrRuntime.getState();
@@ -818,6 +839,9 @@ export async function bootstrapApp(): Promise<void> {
     } else if (shouldUseHandheldScreenFallback()) {
       label = "Enter Screen View";
       hint = "WebXR AR is unavailable here. Use this phone as a fullscreen window into the 3D scene.";
+    } else if (shouldUseNativeMobileAr()) {
+      label = "Start AR Session";
+      hint = "Start native Android WebXR AR using the XR camera feed.";
     } else if (capabilities.immersiveAr !== "supported") {
       enabled = false;
       label = "AR Unsupported";
@@ -926,6 +950,21 @@ export async function bootstrapApp(): Promise<void> {
     timestampMs: performance.now()
   });
   capabilitiesLabel.textContent = `Capabilities\n${JSON.stringify(capabilities, null, 2)}`;
+  if (shouldUseNativeMobileAr()) {
+    desktopTrackingActive = false;
+    switchableDetector.camera.setInlineCameraEnabled(false);
+    cameraTrackButton.disabled = true;
+    cameraTrackButton.textContent = "XR Camera Only";
+    cameraTrackButton.style.opacity = "0.38";
+    cameraTrackButton.style.cursor = "not-allowed";
+    cameraTrackButton.style.border = "1px solid #4a4a35";
+    cameraTrackButton.style.background = "#2f2f25";
+    cameraStatsLabel.textContent = "Camera: waiting for XR session (WebXR camera)";
+    trackingStats.textContent = "Tracking markers: 0 (starts in AR session)";
+    spawnAnchorLabel.textContent = "Spawn anchor: resolved after entering AR";
+    spawnAnchorLabel.style.color = "#7fd8cf";
+    setXrCameraAccessLabel("standard", "pending");
+  }
 
   const setState = (): void => {
     const state = xrRuntime.getState();
@@ -1269,11 +1308,13 @@ export async function bootstrapApp(): Promise<void> {
       }
 
       if (!desktopTrackingActive) {
-        desktopTrackingActive = true;
-        cameraTrackButton.textContent = "Stop Camera Tracking";
-        cameraTrackButton.style.border = "1px solid #7a6a2a";
-        cameraTrackButton.style.background = "#5a4a1f";
-        trackingStats.textContent = "Tracking markers: 0 (scanning...)";
+        if (!shouldUseNativeMobileAr()) {
+          desktopTrackingActive = true;
+          cameraTrackButton.textContent = "Stop Camera Tracking";
+          cameraTrackButton.style.border = "1px solid #7a6a2a";
+          cameraTrackButton.style.background = "#5a4a1f";
+          trackingStats.textContent = "Tracking markers: 0 (scanning...)";
+        }
       }
 
       if (switchableDetector.getMode() === "camera") {
@@ -1281,7 +1322,9 @@ export async function bootstrapApp(): Promise<void> {
         // Detector startup happens from tracking frames, which matches
         // the known-good behavior in af3014 and avoids pre-start lockups.
         cameraStatsLabel.textContent =
-          xrEntryMode === "prelock"
+          shouldUseNativeMobileAr()
+            ? "Camera: waiting for WebXR camera frames"
+            : xrEntryMode === "prelock"
             ? "Camera: waiting for XR detector start"
             : "Camera: priming Quest passthrough workaround";
       }
@@ -1294,7 +1337,12 @@ export async function bootstrapApp(): Promise<void> {
         );
       }
 
-      if (switchableDetector.getMode() === "camera" && xrEntryMode === "prelock" && !lockedSpawnAnchor) {
+      if (
+        !shouldUseNativeMobileAr() &&
+        switchableDetector.getMode() === "camera" &&
+        xrEntryMode === "prelock" &&
+        !lockedSpawnAnchor
+      ) {
         spawnAnchorLabel.textContent = "Spawn anchor: lock a stable marker before starting AR";
         spawnAnchorLabel.style.color = "#ffd27b";
         frameStats.textContent = "Waiting for a stable ArUco lock before starting AR.";
@@ -1302,7 +1350,11 @@ export async function bootstrapApp(): Promise<void> {
         return;
       }
 
-      if (switchableDetector.getMode() === "camera" && xrEntryMode === "passthrough") {
+      if (
+        !shouldUseNativeMobileAr() &&
+        switchableDetector.getMode() === "camera" &&
+        xrEntryMode === "passthrough"
+      ) {
         try {
           await switchableDetector.camera.restartUserMedia();
           cameraStatsLabel.textContent =
@@ -1312,7 +1364,8 @@ export async function bootstrapApp(): Promise<void> {
         }
       }
 
-      pendingXrSpawnAnchorResolve = xrEntryMode === "prelock" && Boolean(lockedSpawnAnchor);
+      pendingXrSpawnAnchorResolve =
+        !shouldUseNativeMobileAr() && xrEntryMode === "prelock" && Boolean(lockedSpawnAnchor);
       await startArSessionWithCameraAccessProbe();
       applyImmersiveOverlayLayout();
       scene.background = null;
