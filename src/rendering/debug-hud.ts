@@ -122,6 +122,11 @@ export class DebugHud {
     this.isDragging = false;
   }
 
+  snapToFollow(): void {
+    this.isDragging = false;
+    this.setMode("follow");
+  }
+
   containsPoint(point: Vector3, camera: Camera, padding = 0.04): boolean {
     camera.getWorldQuaternion(this.tmpQuat);
 

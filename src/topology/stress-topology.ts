@@ -1,5 +1,6 @@
 import type { TopologySnapshot, NodeType, LinkMedium, HealthState } from "../contracts/domain";
 import { parseKml } from "../kml/parser";
+import { geoToLocal } from "../kml";
 
 export interface StressTopologyOptions {
   nodeCount?: number;
@@ -10,6 +11,7 @@ export interface StressTopologyOptions {
 const NODE_TYPES: NodeType[] = ["tower", "backhaul", "router", "switch", "client"];
 const LINK_MEDIA: LinkMedium[] = ["wireless", "wired", "fiber"];
 const HEALTH_STATES: HealthState[] = ["up", "up", "up", "degraded", "down"];
+const KML_ANCHOR_SITE_NAME = "neocity-rf-seva";
 
 export function generateStressTopology(options: StressTopologyOptions = {}): TopologySnapshot {
   const now = Date.now();
@@ -18,6 +20,7 @@ export function generateStressTopology(options: StressTopologyOptions = {}): Top
     const network = parseKml(options.kmlText);
 
     if (network.sites.length > 0) {
+      const anchorSite = network.sites.find((site) => site.name === KML_ANCHOR_SITE_NAME) ?? network.sites[0];
       // Create basic nodes
       const nodes = network.sites.map((site, i) => {
         const type = site.name.toLowerCase().includes("tower") ? "tower" : (site.name.toLowerCase().includes("switch") ? "switch" : "router");
@@ -29,12 +32,18 @@ export function generateStressTopology(options: StressTopologyOptions = {}): Top
           .replace(/st-/g, "st ")
           .replace(/:[0-9a-fA-F]{2}$/i, "")
           .slice(0, 18);
+        const localOffset = geoToLocal(site.lat, site.lon, site.alt, {
+          lat: anchorSite.lat,
+          lon: anchorSite.lon,
+          alt: anchorSite.alt
+        });
 
         return {
           id: site.id,
           markerId: 1000 + i, // Temp, will update the most connected later
           type: type as NodeType,
           label: cleanName,
+          layoutOffsetMeters: localOffset,
           metrics: {
             status,
             rssi: type === "tower" || type === "router" ? randInt(-80, -30) : undefined,
@@ -49,10 +58,6 @@ export function generateStressTopology(options: StressTopologyOptions = {}): Top
           _coords: { lat: site.lat, lon: site.lon, alt: site.alt }
         };
       });
-
-      // Track edge counts
-      const degrees = new Map<string, number>();
-      for (const node of nodes) degrees.set(node.id, 0);
 
       // Create links
       const links: TopologySnapshot["links"] = [];
@@ -92,25 +97,13 @@ export function generateStressTopology(options: StressTopologyOptions = {}): Top
             updatedAtMs: now,
           },
         });
-
-        degrees.set(fromNode.id, (degrees.get(fromNode.id) || 0) + 1);
-        degrees.set(toNode.id, (degrees.get(toNode.id) || 0) + 1);
       }
 
-      // Find node with max degree
-      let maxNodeId = nodes[0].id;
-      let maxDeg = -1;
-      for (const [id, deg] of degrees.entries()) {
-        if (deg > maxDeg) {
-          maxDeg = deg;
-          maxNodeId = id;
-        }
-      }
-
-      // Assign marker 0 to spawn point (most connected node)
+      // Assign marker 0 to the chosen anchor site.
+      const anchorNodeId = nodes.find((node) => node.id === anchorSite.id)?.id ?? nodes[0].id;
       const mappedNodes = nodes.map(n => {
         const { _coords, ...cleanNode } = n;
-        if (cleanNode.id === maxNodeId) {
+        if (cleanNode.id === anchorNodeId) {
           cleanNode.markerId = 0;
         }
         return cleanNode;

@@ -577,6 +577,7 @@ export async function bootstrapApp(): Promise<void> {
   await refreshCameraPermissionState();
 
   let desktopTrackingActive = true;
+  const isQuestBrowser = /OculusBrowser|Meta Quest|Quest/i.test(navigator.userAgent);
   const switchableDetector = new SwitchableDetector("camera");
   switchableDetector.camera.setXrGlContext(renderer.getContext());
   let xrEntryMode: XrEntryMode = "prelock";
@@ -624,7 +625,7 @@ export async function bootstrapApp(): Promise<void> {
   xrEntryModeToggle.addEventListener("click", () => {
     void applyXrEntryMode(xrEntryMode === "prelock" ? "passthrough" : "prelock");
   });
-  await applyXrEntryMode("prelock");
+  await applyXrEntryMode(isQuestBrowser ? "passthrough" : "prelock");
 
   const integrationCoordinator = createIntegrationCoordinator(
     {

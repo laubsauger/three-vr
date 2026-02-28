@@ -5,6 +5,7 @@ export interface RenderNodeView {
   markerId: number;
   label: string;
   type: string;
+  layoutOffsetMeters?: { x: number; y: number; z: number };
   health: HealthState;
   throughputMbps: number;
   latencyMs: number;
@@ -42,6 +43,7 @@ export function selectRenderGraphView(snapshot: TopologySnapshot): RenderGraphVi
       markerId: node.markerId,
       label: node.label,
       type: node.type,
+      layoutOffsetMeters: node.layoutOffsetMeters,
       health: node.metrics.status,
       throughputMbps: node.metrics.throughputMbps ?? 0,
       latencyMs: node.metrics.latencyMs ?? 0,

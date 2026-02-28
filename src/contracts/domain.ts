@@ -20,6 +20,7 @@ export interface InfraNode {
   markerId: number;
   type: NodeType;
   label: string;
+  layoutOffsetMeters?: Vector3Like;
   metrics: MetricSnapshot;
 }
 

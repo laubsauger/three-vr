@@ -6,6 +6,7 @@ import {
   LineLoop,
   Mesh,
   MeshStandardMaterial,
+  Quaternion,
   Scene,
   SphereGeometry,
   Vector3
@@ -53,6 +54,7 @@ export class InfraSceneRenderer {
   private readonly linkGroup = new Group();
   private readonly markerAnchors = new Map<number, Vector3>();
   private preferredSpawnAnchor: Vector3 | null = null;
+  private preferredSpawnRotation: Quaternion | null = null;
   private readonly floatingNodePositions = new Map<string, Vector3>();
   private readonly nodeMeshes = new Map<string, Mesh<SphereGeometry, MeshStandardMaterial>>();
   private readonly linkMeshes = new Map<string, LinkVisualState>();
@@ -79,6 +81,7 @@ export class InfraSceneRenderer {
   private boundaryLoop: LineLoop<BufferGeometry, LineBasicMaterial> | null = null;
   private readonly tmpMid = new Vector3();
   private readonly tmpDir = new Vector3();
+  private readonly tmpLayout = new Vector3();
   private lastTickSec = 0;
   private lastMarkerLayoutAtMs = 0;
 
@@ -149,23 +152,28 @@ export class InfraSceneRenderer {
     this.recomputeLayout();
   }
 
-  setPreferredSpawnAnchor(anchor: Vector3 | null): void {
-    if (!anchor) {
-      if (!this.preferredSpawnAnchor) {
+  setPreferredSpawnAnchor(anchor: Vector3 | null, rotation: Quaternion | null = null): void {
+    if (!anchor || !rotation) {
+      if (!this.preferredSpawnAnchor && !this.preferredSpawnRotation) {
         return;
       }
       this.preferredSpawnAnchor = null;
+      this.preferredSpawnRotation = null;
       this.recomputeLayout();
       return;
     }
 
     const next = this.preferredSpawnAnchor ?? new Vector3();
+    const nextRotation = this.preferredSpawnRotation ?? new Quaternion();
     const dx = next.x - anchor.x;
     const dy = next.y - anchor.y;
     const dz = next.z - anchor.z;
+    const rotationChanged = nextRotation.angleTo(rotation) > 0.01;
     next.copy(anchor);
+    nextRotation.copy(rotation);
     this.preferredSpawnAnchor = next;
-    if (dx * dx + dy * dy + dz * dz > MARKER_LAYOUT_POSITION_EPSILON_SQ) {
+    this.preferredSpawnRotation = nextRotation;
+    if (dx * dx + dy * dy + dz * dz > MARKER_LAYOUT_POSITION_EPSILON_SQ || rotationChanged) {
       this.recomputeLayout();
     }
   }
@@ -535,6 +543,17 @@ export class InfraSceneRenderer {
     const markerAnchor = this.markerAnchors.get(node.markerId);
     if (markerAnchor) {
       return markerAnchor;
+    }
+    if (this.preferredSpawnAnchor && node.layoutOffsetMeters) {
+      this.tmpLayout.set(
+        node.layoutOffsetMeters.x,
+        node.layoutOffsetMeters.y,
+        node.layoutOffsetMeters.z
+      );
+      if (this.preferredSpawnRotation) {
+        this.tmpLayout.applyQuaternion(this.preferredSpawnRotation);
+      }
+      return this.tmpLayout.add(this.preferredSpawnAnchor);
     }
     if (node.markerId === 0 && this.preferredSpawnAnchor) {
       return this.preferredSpawnAnchor;

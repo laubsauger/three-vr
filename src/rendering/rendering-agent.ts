@@ -43,6 +43,7 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
   let unsubscribeSpawnAnchor: (() => void) | null = null;
   let unsubscribeHands: (() => void) | null = null;
   let unsubscribePinch: (() => void) | null = null;
+  let unsubscribePoint: (() => void) | null = null;
   let animationHandle = 0;
   let xrRunning = false;
   let hasLockedSpawnAnchor = false;
@@ -153,7 +154,7 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
         unsubscribeSpawnAnchor = context.events.on("tracking/spawn-anchor", (payload) => {
           if (!payload.position || !payload.rotation) {
             hasLockedSpawnAnchor = false;
-            renderer.setPreferredSpawnAnchor(null);
+            renderer.setPreferredSpawnAnchor(null, null);
             return;
           }
 
@@ -165,7 +166,7 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
             payload.rotation.w
           );
           hasLockedSpawnAnchor = true;
-          renderer.setPreferredSpawnAnchor(lockedSpawnPos);
+          renderer.setPreferredSpawnAnchor(lockedSpawnPos, lockedSpawnQuat);
 
           if (kmlMap.isLoaded()) {
             kmlMap.anchorToMarker(lockedSpawnPos, lockedSpawnQuat);
@@ -277,6 +278,15 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
           }
         });
 
+        unsubscribePoint = context.events.on("interaction/point", (payload) => {
+          if (payload.hand !== "left" || payload.state !== "start") {
+            return;
+          }
+
+          debugHud.snapToFollow();
+          hudDragHand = null;
+        });
+
         if (context.xrRuntime.getState() === "running") {
           xrRunning = true;
           hudData.xrState = "running";
@@ -335,11 +345,15 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
         unsubscribePinch();
         unsubscribePinch = null;
       }
+      if (unsubscribePoint) {
+        unsubscribePoint();
+        unsubscribePoint = null;
+      }
       if (animationHandle) {
         window.cancelAnimationFrame(animationHandle);
         animationHandle = 0;
       }
-      debugHud.endDrag();
+      debugHud.snapToFollow();
       hudDragHand = null;
       kmlMap.dispose();
       markerIndicators.dispose();
