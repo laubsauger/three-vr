@@ -51,11 +51,6 @@ interface LockedSpawnAnchorState {
   relativeRotation: Quaternion;
 }
 
-interface StyleSnapshot {
-  element: HTMLElement;
-  previous: Map<string, string>;
-}
-
 type CameraPermissionState = PermissionState | "unsupported" | "unknown";
 type XrCameraAccessState = "unknown" | "probing" | "required" | "fallback" | "standard";
 type XrEntryMode = "prelock" | "passthrough";
@@ -896,63 +891,11 @@ export async function bootstrapApp(): Promise<void> {
   const switchableDetector = new SwitchableDetector("camera");
   switchableDetector.camera.setXrGlContext(renderer.getContext());
   let xrEntryMode: XrEntryMode = "prelock";
-  const immersiveOverlaySnapshots: StyleSnapshot[] = [];
-  const captureImmersiveOverlayStyles = (
-    element: HTMLElement,
-    nextStyles: Record<string, string>
-  ): void => {
-    const previous = new Map<string, string>();
-    for (const [property, value] of Object.entries(nextStyles)) {
-      previous.set(property, element.style.getPropertyValue(property));
-      element.style.setProperty(property, value);
-    }
-    immersiveOverlaySnapshots.push({ element, previous });
-  };
   const applyImmersiveOverlayLayout = (): void => {
-    if (immersiveOverlaySnapshots.length > 0) {
-      return;
-    }
-
-    captureImmersiveOverlayStyles(wrapper, {
-      position: "fixed",
-      inset: "0",
-      "max-width": "none",
-      margin: "0",
-      padding: "0",
-      gap: "0",
-      "min-height": "100vh",
-      background: "transparent",
-      "z-index": "999"
-    });
-    captureImmersiveOverlayStyles(toolbar, {
-      display: "none"
-    });
-    captureImmersiveOverlayStyles(filterBar, {
-      display: "none"
-    });
-    captureImmersiveOverlayStyles(statusGrid, {
-      display: "none"
-    });
-    captureImmersiveOverlayStyles(canvasHolder, {
-      display: "none"
-    });
     xrOverlayRoot.style.display = "block";
   };
   const restoreImmersiveOverlayLayout = (): void => {
     xrOverlayRoot.style.display = "none";
-    while (immersiveOverlaySnapshots.length > 0) {
-      const snapshot = immersiveOverlaySnapshots.pop();
-      if (!snapshot) {
-        continue;
-      }
-      for (const [property, previousValue] of snapshot.previous) {
-        if (previousValue) {
-          snapshot.element.style.setProperty(property, previousValue);
-        } else {
-          snapshot.element.style.removeProperty(property);
-        }
-      }
-    }
   };
   const resizeRendererToViewport = (): void => {
     const nextWidth = window.innerWidth;
