@@ -63,7 +63,7 @@ export function selectRenderGraphView(snapshot: TopologySnapshot): RenderGraphVi
         utilizationPct: utilPct,
         latencyMs: link.metrics.latencyMs ?? 0,
         packetLossPct: link.metrics.packetLossPct ?? 0,
-        beamColorHex: selectLinkColor(link.metrics.status),
+        beamColorHex: selectLinkColor(link.medium, link.metrics.status),
         beamRadius: baseRadius,
         trafficRadius: selectTrafficRadius(baseRadius, utilPct),
         flowHz: selectFlowFrequency(utilPct),
@@ -72,15 +72,31 @@ export function selectRenderGraphView(snapshot: TopologySnapshot): RenderGraphVi
   };
 }
 
-function selectLinkColor(status: HealthState): string {
-  if (status === "up") {
-    return "#35d07f";
-  }
-  if (status === "degraded") {
-    return "#ffd24d";
-  }
+function selectLinkColor(medium: string, status: HealthState): string {
   if (status === "down") {
     return "#ff5b5b";
+  }
+  if (status === "degraded") {
+    if (medium === "fiber") {
+      return "#7fd9ff";
+    }
+    if (medium === "wired") {
+      return "#7ff0c2";
+    }
+    if (medium === "wireless") {
+      return "#ffe07a";
+    }
+    return "#d6dee4";
+  }
+
+  if (medium === "fiber") {
+    return "#4ab8ff";
+  }
+  if (medium === "wired") {
+    return "#39d78f";
+  }
+  if (medium === "wireless") {
+    return "#f4c34d";
   }
   return "#9fb4be";
 }

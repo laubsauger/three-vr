@@ -26,9 +26,22 @@ const MIN_LINK_BEAM_RADIUS = 0.003;
 const MIN_PACKET_RADIUS = 0.008;
 const MARKER_LAYOUT_POSITION_EPSILON_SQ = 0.0004;
 const MARKER_LAYOUT_MIN_INTERVAL_MS = 80;
-const MAX_KML_LAYOUT_RADIUS_NO_BOUNDARY = 1.25;
-const MIN_KML_LAYOUT_RADIUS = 0.45;
-const KML_LAYOUT_BOUNDARY_PADDING = 0.86;
+const MAX_KML_LAYOUT_RADIUS_NO_BOUNDARY = 1.45;
+const MIN_KML_LAYOUT_RADIUS = 0.52;
+const KML_LAYOUT_BOUNDARY_PADDING = 0.94;
+const DEFAULT_NODE_OPACITY = 0.88;
+const DEFAULT_LINK_OPACITY = 0.34;
+const DEFAULT_PACKET_OPACITY = 0.54;
+const FOCUS_NODE_OPACITY = 1;
+const FOCUS_LINK_OPACITY = 0.74;
+const FOCUS_PACKET_OPACITY = 0.92;
+const DIM_NODE_OPACITY = 0.34;
+const DIM_LINK_OPACITY = 0.17;
+const DIM_PACKET_OPACITY = 0.28;
+const SELECTED_HIGHLIGHT_HEX = 0x5cf2ff;
+const HOVER_HIGHLIGHT_HEX = 0x8feaff;
+const MIN_NODE_SCALE_FACTOR = 0.84;
+const MAX_NODE_SCALE_FACTOR = 1.28;
 
 interface LinkVisualState {
   group: Group;
@@ -85,6 +98,10 @@ export class InfraSceneRenderer {
   private readonly tmpMid = new Vector3();
   private readonly tmpDir = new Vector3();
   private readonly tmpLayout = new Vector3();
+  private selectedNodeId: string | null = null;
+  private selectedLinkId: string | null = null;
+  private hoveredNodeId: string | null = null;
+  private hoveredLinkId: string | null = null;
   private lastTickSec = 0;
   private lastMarkerLayoutAtMs = 0;
 
@@ -102,6 +119,7 @@ export class InfraSceneRenderer {
     this.syncNodeMeshes(graph.nodes);
     this.syncLinkMeshes(graph.links);
     this.recomputeLayout();
+    this.applyInteractionStyling();
   }
 
   updateTrackedMarkers(markers: TrackedMarker[]): void {
@@ -179,6 +197,26 @@ export class InfraSceneRenderer {
     if (dx * dx + dy * dy + dz * dz > MARKER_LAYOUT_POSITION_EPSILON_SQ || rotationChanged) {
       this.recomputeLayout();
     }
+  }
+
+  setSelection(selectedNodeId: string | null, selectedLinkId: string | null): void {
+    if (this.selectedNodeId === selectedNodeId && this.selectedLinkId === selectedLinkId) {
+      return;
+    }
+    this.selectedNodeId = selectedNodeId;
+    this.selectedLinkId = selectedLinkId;
+    this.applyInteractionStyling();
+  }
+
+  setHover(kind: "node" | "link" | null, id: string | null): void {
+    const nextHoveredNodeId = kind === "node" ? id : null;
+    const nextHoveredLinkId = kind === "link" ? id : null;
+    if (this.hoveredNodeId === nextHoveredNodeId && this.hoveredLinkId === nextHoveredLinkId) {
+      return;
+    }
+    this.hoveredNodeId = nextHoveredNodeId;
+    this.hoveredLinkId = nextHoveredLinkId;
+    this.applyInteractionStyling();
   }
 
   tick(timeMs: number): void {
@@ -259,6 +297,7 @@ export class InfraSceneRenderer {
 
   private syncNodeMeshes(nodes: RenderNodeView[]): void {
     const nextIds = new Set(nodes.map((node) => node.id));
+    const connectionCounts = this.getNodeConnectionCounts();
 
     for (const [nodeId, mesh] of this.nodeMeshes) {
       if (nextIds.has(nodeId)) {
@@ -271,6 +310,7 @@ export class InfraSceneRenderer {
     }
 
     for (const node of nodes) {
+      const scale = NODE_RADIUS * this.getNodeScaleFactor(connectionCounts.get(node.id) ?? 0);
       let mesh = this.nodeMeshes.get(node.id);
       if (!mesh) {
         mesh = new Mesh(
@@ -278,7 +318,7 @@ export class InfraSceneRenderer {
           new MeshStandardMaterial({ color: selectNodeColor(node.health), roughness: 0.3, metalness: 0.1 })
         );
         this.updateNodeMaterial(mesh.material, selectNodeColor(node.health));
-        mesh.scale.setScalar(NODE_RADIUS);
+        mesh.scale.setScalar(scale);
         mesh.name = `node-${node.id}`;
         const metadata: SelectableMeta = {
           selectableType: "node",
@@ -292,6 +332,7 @@ export class InfraSceneRenderer {
         this.nodeMeshes.set(node.id, mesh);
       } else {
         this.updateNodeMaterial(mesh.material, selectNodeColor(node.health));
+        mesh.scale.setScalar(scale);
       }
     }
   }
@@ -680,8 +721,191 @@ export class InfraSceneRenderer {
         colorHex: material.color.getHex(),
         emissiveHex: material.emissive.getHex(),
         emissiveIntensity: material.emissiveIntensity,
+        opacity: material.opacity,
       },
     };
+  }
+
+  private getNodeConnectionCounts(): Map<string, number> {
+    const counts = new Map<string, number>();
+    for (const link of this.graph.links) {
+      counts.set(link.fromNodeId, (counts.get(link.fromNodeId) ?? 0) + 1);
+      counts.set(link.toNodeId, (counts.get(link.toNodeId) ?? 0) + 1);
+    }
+    return counts;
+  }
+
+  private getNodeScaleFactor(connectionCount: number): number {
+    if (connectionCount <= 0) {
+      return MIN_NODE_SCALE_FACTOR;
+    }
+
+    const normalized = Math.min(connectionCount - 1, 6) / 6;
+    return MIN_NODE_SCALE_FACTOR + normalized * (MAX_NODE_SCALE_FACTOR - MIN_NODE_SCALE_FACTOR);
+  }
+
+  private applyInteractionStyling(): void {
+    const focus = this.resolveFocusTargets();
+    const focusColorHex =
+      focus.mode === "selected"
+        ? SELECTED_HIGHLIGHT_HEX
+        : focus.mode === "hover"
+          ? HOVER_HIGHLIGHT_HEX
+          : null;
+
+    for (const node of this.graph.nodes) {
+      const mesh = this.nodeMeshes.get(node.id);
+      if (!mesh) {
+        continue;
+      }
+
+      const isPrimary = focus.primaryKind === "node" && focus.primaryId === node.id;
+      const isContext = focus.relatedNodeIds?.has(node.id) ?? false;
+      const opacity = focus.mode === "none"
+        ? DEFAULT_NODE_OPACITY
+        : isPrimary || isContext
+          ? FOCUS_NODE_OPACITY
+          : DIM_NODE_OPACITY;
+      const highlight =
+        focus.mode !== "none" && (isPrimary || isContext)
+          ? isPrimary
+            ? focusColorHex
+            : HOVER_HIGHLIGHT_HEX
+          : null;
+      this.applyNodeVisual(mesh.material, selectNodeColor(node.health), opacity, highlight);
+    }
+
+    for (const link of this.graph.links) {
+      const visual = this.linkMeshes.get(link.id);
+      if (!visual) {
+        continue;
+      }
+
+      const isPrimary = focus.primaryKind === "link" && focus.primaryId === link.id;
+      const isContext = focus.relatedLinkIds?.has(link.id) ?? false;
+      const segmentOpacity = focus.mode === "none"
+        ? DEFAULT_LINK_OPACITY
+        : isPrimary || isContext
+          ? FOCUS_LINK_OPACITY
+          : DIM_LINK_OPACITY;
+      const packetOpacity = focus.mode === "none"
+        ? DEFAULT_PACKET_OPACITY
+        : isPrimary || isContext
+          ? FOCUS_PACKET_OPACITY
+          : DIM_PACKET_OPACITY;
+      const highlight =
+        focus.mode !== "none" && (isPrimary || isContext)
+          ? isPrimary
+            ? focusColorHex
+            : HOVER_HIGHLIGHT_HEX
+          : null;
+
+      this.applyLinkVisual(
+        visual,
+        link.beamColorHex,
+        segmentOpacity,
+        packetOpacity,
+        highlight,
+        isPrimary
+      );
+    }
+  }
+
+  private resolveFocusTargets(): {
+    mode: "none" | "hover" | "selected";
+    primaryKind: "node" | "link" | null;
+    primaryId: string | null;
+    relatedNodeIds: Set<string> | null;
+    relatedLinkIds: Set<string> | null;
+  } {
+    const primaryKind = this.selectedNodeId
+      ? "node"
+      : this.selectedLinkId
+        ? "link"
+        : this.hoveredNodeId
+          ? "node"
+          : this.hoveredLinkId
+            ? "link"
+            : null;
+    const primaryId = this.selectedNodeId
+      ?? this.selectedLinkId
+      ?? this.hoveredNodeId
+      ?? this.hoveredLinkId
+      ?? null;
+
+    if (!primaryKind || !primaryId) {
+      return {
+        mode: "none",
+        primaryKind: null,
+        primaryId: null,
+        relatedNodeIds: null,
+        relatedLinkIds: null,
+      };
+    }
+
+    const relatedNodeIds = new Set<string>();
+    const relatedLinkIds = new Set<string>();
+
+    if (primaryKind === "node") {
+      relatedNodeIds.add(primaryId);
+      for (const link of this.graph.links) {
+        if (link.fromNodeId !== primaryId && link.toNodeId !== primaryId) {
+          continue;
+        }
+        relatedLinkIds.add(link.id);
+        relatedNodeIds.add(link.fromNodeId);
+        relatedNodeIds.add(link.toNodeId);
+      }
+    } else {
+      relatedLinkIds.add(primaryId);
+      const primaryLink = this.graph.links.find((link) => link.id === primaryId);
+      if (primaryLink) {
+        relatedNodeIds.add(primaryLink.fromNodeId);
+        relatedNodeIds.add(primaryLink.toNodeId);
+      }
+    }
+
+    return {
+      mode: this.selectedNodeId || this.selectedLinkId ? "selected" : "hover",
+      primaryKind,
+      primaryId,
+      relatedNodeIds,
+      relatedLinkIds,
+    };
+  }
+
+  private applyNodeVisual(
+    material: MeshStandardMaterial,
+    baseColorHex: string,
+    opacity: number,
+    highlightHex: number | null
+  ): void {
+    material.transparent = opacity < 0.999;
+    material.opacity = opacity;
+    material.color.set(highlightHex ?? baseColorHex);
+    material.emissive.set(highlightHex ?? 0x000000);
+    material.emissiveIntensity = highlightHex ? 0.36 : 0;
+  }
+
+  private applyLinkVisual(
+    visual: LinkVisualState,
+    baseColorHex: string,
+    segmentOpacity: number,
+    packetOpacity: number,
+    highlightHex: number | null,
+    isPrimary: boolean
+  ): void {
+    visual.segmentMaterial.transparent = segmentOpacity < 0.999;
+    visual.segmentMaterial.opacity = segmentOpacity;
+    visual.segmentMaterial.color.set(highlightHex ?? baseColorHex);
+    visual.segmentMaterial.emissive.set(highlightHex ?? baseColorHex);
+    visual.segmentMaterial.emissiveIntensity = isPrimary ? 0.7 : highlightHex ? 0.4 : 0.22;
+
+    visual.packetMaterial.transparent = packetOpacity < 0.999;
+    visual.packetMaterial.opacity = packetOpacity;
+    visual.packetMaterial.color.set(highlightHex ?? baseColorHex);
+    visual.packetMaterial.emissive.set(highlightHex ?? baseColorHex);
+    visual.packetMaterial.emissiveIntensity = isPrimary ? 1.15 : highlightHex ? 0.8 : 0.72;
   }
 }
 

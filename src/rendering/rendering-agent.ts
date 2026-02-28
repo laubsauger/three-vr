@@ -42,6 +42,8 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
   let unsubscribePerformance: (() => void) | null = null;
   let unsubscribeTrackingStatus: (() => void) | null = null;
   let unsubscribeSpawnAnchor: (() => void) | null = null;
+  let unsubscribeSelection: (() => void) | null = null;
+  let unsubscribeHover: (() => void) | null = null;
   let unsubscribeHands: (() => void) | null = null;
   let unsubscribePinch: (() => void) | null = null;
   let unsubscribePoint: (() => void) | null = null;
@@ -226,6 +228,14 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
           }
         });
 
+        unsubscribeSelection = context.events.on("interaction/selection-change", (payload) => {
+          renderer.setSelection(payload.selectedNodeId, payload.selectedLinkId);
+        });
+
+        unsubscribeHover = context.events.on("interaction/hover", (payload) => {
+          renderer.setHover(payload.kind, payload.id);
+        });
+
         unsubscribeHands = context.events.on("interaction/hands", (payload) => {
           const viewCamera = getViewCamera();
           handVisualizer.setHands(payload.hands);
@@ -344,6 +354,14 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
       if (unsubscribeSpawnAnchor) {
         unsubscribeSpawnAnchor();
         unsubscribeSpawnAnchor = null;
+      }
+      if (unsubscribeSelection) {
+        unsubscribeSelection();
+        unsubscribeSelection = null;
+      }
+      if (unsubscribeHover) {
+        unsubscribeHover();
+        unsubscribeHover = null;
       }
       if (unsubscribeHands) {
         unsubscribeHands();
