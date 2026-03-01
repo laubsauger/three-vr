@@ -929,6 +929,11 @@ export async function bootstrapApp(): Promise<void> {
   });
   const shouldUseHandheldScreenFallback = (): boolean =>
     canUseHandheldScreenFallback && capabilities?.immersiveAr !== "supported";
+  const shouldReleaseInlineCameraForMobileXr = (): boolean =>
+    isVrUi &&
+    !isQuestBrowser &&
+    switchableDetector.getMode() === "camera" &&
+    xrRuntime.getState() !== "running";
 
   const refreshStartButtonState = (): void => {
     const state = xrRuntime.getState();
@@ -990,19 +995,25 @@ export async function bootstrapApp(): Promise<void> {
   };
 
   const applyXrEntryMode = async (mode: XrEntryMode): Promise<void> => {
-    xrEntryMode = mode;
+    xrEntryMode = isQuestBrowser ? mode : "prelock";
     xrEntryModeToggle.textContent =
-      mode === "prelock" ? "XR Mode: Prelock Anchor" : "XR Mode: Passthrough Hack";
+      xrEntryMode === "prelock" ? "XR Mode: Prelock Anchor" : "XR Mode: Passthrough Hack";
     xrEntryModeToggle.style.border =
-      mode === "prelock" ? "1px solid #6a5a2a" : "1px solid #2a6a63";
+      xrEntryMode === "prelock" ? "1px solid #6a5a2a" : "1px solid #2a6a63";
     xrEntryModeToggle.style.background =
-      mode === "prelock" ? "#3f3520" : "#17443f";
+      xrEntryMode === "prelock" ? "#3f3520" : "#17443f";
+    xrEntryModeToggle.disabled = !isQuestBrowser;
+    xrEntryModeToggle.style.opacity = isQuestBrowser ? "1" : "0.58";
+    xrEntryModeToggle.style.cursor = isQuestBrowser ? "pointer" : "not-allowed";
+    xrEntryModeToggle.title = isQuestBrowser
+      ? "Toggle between marker prelock and Quest passthrough camera workaround."
+      : "Phones use the prelock flow so the marker lock can anchor the XR scene.";
 
     switchableDetector.camera.setUserMediaPreference(
-      mode === "prelock" ? "default" : "quest-passthrough"
+      xrEntryMode === "prelock" ? "default" : "quest-passthrough"
     );
 
-    if (mode === "prelock") {
+    if (xrEntryMode === "prelock") {
       if (!lockedSpawnAnchor) {
         spawnAnchorLabel.textContent = "Spawn anchor: waiting for stable marker";
         spawnAnchorLabel.style.color = "#dbe5e8";
@@ -1017,7 +1028,7 @@ export async function bootstrapApp(): Promise<void> {
       desktopTrackingActive &&
       switchableDetector.getMode() === "camera" &&
       xrRuntime.getState() !== "running" &&
-      (switchableDetector.camera.getStatus() !== "idle" || mode === "passthrough")
+      (switchableDetector.camera.getStatus() !== "idle" || xrEntryMode === "passthrough")
     ) {
       try {
         await switchableDetector.camera.restartUserMedia();
@@ -1032,6 +1043,9 @@ export async function bootstrapApp(): Promise<void> {
   };
 
   xrEntryModeToggle.addEventListener("click", () => {
+    if (!isQuestBrowser) {
+      return;
+    }
     void applyXrEntryMode(xrEntryMode === "prelock" ? "passthrough" : "prelock");
   });
   await applyXrEntryMode(isQuestBrowser ? "passthrough" : "prelock");
@@ -1387,6 +1401,7 @@ export async function bootstrapApp(): Promise<void> {
   });
 
   startButton.addEventListener("click", async () => {
+    let releasedInlineCameraForXrStart = false;
     try {
       if (shouldUseHandheldScreenFallback()) {
         setArStartDiagnostic(
@@ -1466,6 +1481,12 @@ export async function bootstrapApp(): Promise<void> {
         }
       }
 
+      if (shouldReleaseInlineCameraForMobileXr()) {
+        switchableDetector.camera.setInlineCameraEnabled(false);
+        releasedInlineCameraForXrStart = true;
+        cameraStatsLabel.textContent = "Camera: released inline stream for XR start";
+      }
+
       pendingXrSpawnAnchorResolve = xrEntryMode === "prelock" && Boolean(lockedSpawnAnchor);
       await startArSessionWithCameraAccessProbe();
       applyImmersiveOverlayLayout();
@@ -1477,6 +1498,10 @@ export async function bootstrapApp(): Promise<void> {
       }
       setState();
     } catch (error) {
+      if (releasedInlineCameraForXrStart) {
+        switchableDetector.camera.setInlineCameraEnabled(true);
+        cameraStatsLabel.textContent = "Camera: restoring inline scan after XR start failure";
+      }
       const details = error instanceof Error ? error.message : String(error);
       setArStartDiagnostic("start button handler failed", details, { error: true });
       emitError("XR_SESSION_START_FAILED", `Failed to start XR session: ${details}`, true, {
@@ -1495,6 +1520,12 @@ export async function bootstrapApp(): Promise<void> {
       }
 
       await xrRuntime.stop();
+      if (shouldReleaseInlineCameraForMobileXr()) {
+        switchableDetector.camera.setInlineCameraEnabled(true);
+        if (desktopTrackingActive && switchableDetector.getMode() === "camera") {
+          cameraStatsLabel.textContent = "Camera: resuming inline scan";
+        }
+      }
       restoreImmersiveOverlayLayout();
       scene.background = defaultBackground;
       if (!desktopLoopHandle) {
