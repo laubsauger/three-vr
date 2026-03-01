@@ -67,6 +67,7 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
   const getViewCamera = (): Camera => (
     xrRunning ? options.renderer.xr.getCamera() : options.camera
   );
+  const shouldHidePhoneXrHelpers = (): boolean => xrRunning && isCoarsePointer;
   const applyHudLayout = (): void => {
     if (xrRunning && isCoarsePointer) {
       debugHud.setFollowLayout(new Vector3(-0.07, -0.08, -0.42), {
@@ -80,6 +81,28 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
       x: 0.19,
       y: 0.159
     });
+  };
+  const resetHandHudState = (): void => {
+    handVisualizer.setHands([]);
+    hudData.handsDetected = 0;
+    hudData.leftPinch = false;
+    hudData.rightPinch = false;
+    hudData.leftPinchStrength = 0;
+    hudData.rightPinchStrength = 0;
+    hudData.leftPoint = false;
+    hudData.rightPoint = false;
+    hudData.leftPointStrength = 0;
+    hudData.rightPointStrength = 0;
+    debugHud.endDrag();
+    hudDragHand = null;
+  };
+  const applyPhoneXrHelperVisibility = (): void => {
+    const hidden = shouldHidePhoneXrHelpers();
+    handVisualizer.getRoot().visible = !hidden;
+    debugHud.sprite.visible = !hidden;
+    if (hidden) {
+      resetHandHudState();
+    }
   };
 
   // Debug HUD state
@@ -112,12 +135,15 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
       renderer.tick(timeMs);
     }
     labelManager.updateVisibility(viewCamera);
-    handVisualizer.update(viewCamera);
-    // Keep HUD position locked to camera every frame (including desktop)
-    debugHud.update(hudData, timeMs, viewCamera);
+    if (!shouldHidePhoneXrHelpers()) {
+      handVisualizer.update(viewCamera);
+      // Keep HUD position locked to camera every frame (including desktop)
+      debugHud.update(hudData, timeMs, viewCamera);
+    }
     animationHandle = window.requestAnimationFrame(animate);
   };
   applyHudLayout();
+  applyPhoneXrHelperVisibility();
 
   return {
     async init(context: IntegrationContext): Promise<void> {
@@ -199,6 +225,7 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
         unsubscribeXrState = context.events.on("xr/state", (payload) => {
           xrRunning = payload.state === "running";
           applyHudLayout();
+          applyPhoneXrHelperVisibility();
           hudData.xrState = payload.state;
           if (payload.state === "running") {
             renderer.setBoundaryPolygon(context.xrRuntime.getBoundaryPolygon());
@@ -220,9 +247,11 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
             renderer.tick(payload.time);
           }
           labelManager.updateVisibility(viewCamera);
-          handVisualizer.update(viewCamera);
-          hudData.hudMode = debugHud.mode;
-          debugHud.update(hudData, payload.time, viewCamera);
+          if (!shouldHidePhoneXrHelpers()) {
+            handVisualizer.update(viewCamera);
+            hudData.hudMode = debugHud.mode;
+            debugHud.update(hudData, payload.time, viewCamera);
+          }
         });
 
         unsubscribePerformance = context.events.on("app/performance", (payload) => {
@@ -254,6 +283,10 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
         });
 
         unsubscribeHands = context.events.on("interaction/hands", (payload) => {
+          if (shouldHidePhoneXrHelpers()) {
+            resetHandHudState();
+            return;
+          }
           const viewCamera = getViewCamera();
           handVisualizer.setHands(payload.hands);
           handVisualizer.update(viewCamera);
@@ -296,6 +329,9 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
         });
 
         unsubscribePinch = context.events.on("interaction/pinch", (payload) => {
+          if (shouldHidePhoneXrHelpers()) {
+            return;
+          }
           if (payload.hand !== "left") {
             return;
           }
@@ -314,6 +350,9 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
         });
 
         unsubscribePoint = context.events.on("interaction/point", (payload) => {
+          if (shouldHidePhoneXrHelpers()) {
+            return;
+          }
           if (payload.hand !== "left" || payload.state !== "start") {
             return;
           }
@@ -329,6 +368,8 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
         } else {
           xrRunning = false;
         }
+        applyHudLayout();
+        applyPhoneXrHelperVisibility();
 
         animationHandle = window.requestAnimationFrame(animate);
       } catch (error) {

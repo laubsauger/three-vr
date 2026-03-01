@@ -107,6 +107,7 @@ export function createInteractionAgent(options: InteractionAgentOptions): Intera
 
   const materialBaselines = new WeakMap<Material, MaterialBaseline>();
   const handTracker = new HandTracker();
+  const isCoarsePointer = window.matchMedia("(pointer: coarse)").matches;
 
   // ---- Visual state management ----
 
@@ -172,6 +173,13 @@ export function createInteractionAgent(options: InteractionAgentOptions): Intera
       selectedLinkId,
       timestampMs: performance.now()
     });
+  };
+
+  const clearSelection = (context: IntegrationContext): void => {
+    if (!selectedObject && !selectedNodeId && !selectedLinkId) {
+      return;
+    }
+    updateSelection(context, null);
   };
 
   // ---- Picking helpers ----
@@ -331,6 +339,9 @@ export function createInteractionAgent(options: InteractionAgentOptions): Intera
     async init(context: IntegrationContext): Promise<void> {
       // Desktop: click to select
       onPointerDown = (event: PointerEvent) => {
+        if (isCoarsePointer) {
+          return;
+        }
         const canvas = options.renderer.domElement;
         const bounds = canvas.getBoundingClientRect();
         if (bounds.width === 0 || bounds.height === 0) return;
@@ -343,6 +354,9 @@ export function createInteractionAgent(options: InteractionAgentOptions): Intera
 
       // Desktop: move to hover
       onPointerMove = (event: PointerEvent) => {
+        if (isCoarsePointer) {
+          return;
+        }
         const canvas = options.renderer.domElement;
         const bounds = canvas.getBoundingClientRect();
         if (bounds.width === 0 || bounds.height === 0) return;
@@ -360,6 +374,12 @@ export function createInteractionAgent(options: InteractionAgentOptions): Intera
 
       unsubscribeXrState = context.events.on("xr/state", (payload) => {
         if (payload.state === "running") {
+          if (isCoarsePointer) {
+            clearSelection(context);
+          }
+          if (isCoarsePointer && hoveredObject) {
+            updateHover(context, null);
+          }
           attachSessionListeners(context, context.xrRuntime.getSession());
         } else {
           detachSessionListeners();
@@ -369,6 +389,13 @@ export function createInteractionAgent(options: InteractionAgentOptions): Intera
       // Per-frame hand tracking + hover
       unsubscribeXrFrame = context.events.on("xr/frame", (tick) => {
         if (!tick.frame || !tick.referenceSpace) return;
+        if (isCoarsePointer) {
+          handTracker.reset();
+          if (hoveredObject) {
+            updateHover(context, null);
+          }
+          return;
+        }
 
         const hands = handTracker.readHands(tick.frame, tick.referenceSpace);
         if (!hands) {
@@ -422,12 +449,14 @@ export function createInteractionAgent(options: InteractionAgentOptions): Intera
 
       // Right-hand pinch → select current hover target (or deselect)
       unsubscribePinch = context.events.on("interaction/pinch", (payload) => {
+        if (isCoarsePointer) return;
         if (payload.hand !== "right" || payload.state !== "start") return;
         updateSelection(context, hoveredTarget);
       });
 
       // Right-hand point → select via pointing ray
       unsubscribePoint = context.events.on("interaction/point", (payload) => {
+        if (isCoarsePointer) return;
         if (payload.hand !== "right" || payload.state !== "start") return;
         fingerTipPos.set(payload.position.x, payload.position.y, payload.position.z);
         fingerRayDir.set(payload.direction.x, payload.direction.y, payload.direction.z);
