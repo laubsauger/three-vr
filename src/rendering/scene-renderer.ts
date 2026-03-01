@@ -26,7 +26,7 @@ const MIN_LINK_BEAM_RADIUS = 0.003;
 const MIN_PACKET_RADIUS = 0.008;
 const MARKER_LAYOUT_POSITION_EPSILON_SQ = 0.0004;
 const MARKER_LAYOUT_MIN_INTERVAL_MS = 80;
-const MAX_KML_LAYOUT_RADIUS_NO_BOUNDARY = 1.45;
+const MAX_KML_LAYOUT_RADIUS_NO_BOUNDARY = 2.2;
 const MIN_KML_LAYOUT_RADIUS = 0.52;
 const KML_LAYOUT_BOUNDARY_PADDING = 0.94;
 const DEFAULT_NODE_OPACITY = 0.88;
@@ -45,6 +45,8 @@ const MAX_NODE_SCALE_FACTOR = 1.28;
 const OVERLAP_KEY_PRECISION = 50;
 const OVERLAP_SPREAD_RADIUS = 0.08;
 const OVERLAP_SPREAD_RING_GAP = 0.055;
+const MIN_KML_LAYOUT_SCALE_MULTIPLIER = 0.5;
+const MAX_KML_LAYOUT_SCALE_MULTIPLIER = 6;
 
 interface LinkVisualState {
   group: Group;
@@ -107,6 +109,7 @@ export class InfraSceneRenderer {
   private hoveredLinkId: string | null = null;
   private lastTickSec = 0;
   private lastMarkerLayoutAtMs = 0;
+  private kmlLayoutScaleMultiplier = 1;
 
   constructor(scene: Scene) {
     this.root.name = "infra-root";
@@ -200,6 +203,18 @@ export class InfraSceneRenderer {
     if (dx * dx + dy * dy + dz * dz > MARKER_LAYOUT_POSITION_EPSILON_SQ || rotationChanged) {
       this.recomputeLayout();
     }
+  }
+
+  setKmlLayoutScaleMultiplier(multiplier: number): void {
+    const nextMultiplier = Math.min(
+      MAX_KML_LAYOUT_SCALE_MULTIPLIER,
+      Math.max(MIN_KML_LAYOUT_SCALE_MULTIPLIER, multiplier)
+    );
+    if (Math.abs(this.kmlLayoutScaleMultiplier - nextMultiplier) < 0.001) {
+      return;
+    }
+    this.kmlLayoutScaleMultiplier = nextMultiplier;
+    this.recomputeLayout();
   }
 
   setSelection(selectedNodeId: string | null, selectedLinkId: string | null): void {
@@ -497,9 +512,10 @@ export class InfraSceneRenderer {
     const output = new Map<string, Vector3>();
     const floating: RenderNodeView[] = [];
     const kmlLayoutScale = this.getKmlLayoutScale(nodes);
+    const anchorLayoutOffset = this.getAnchorLayoutOffset(nodes, kmlLayoutScale);
 
     for (const node of nodes) {
-      const position = this.resolveNodeAnchor(node, kmlLayoutScale);
+      const position = this.resolveNodeAnchor(node, kmlLayoutScale, anchorLayoutOffset);
       if (position) {
         output.set(node.id, this.clampToBoundary(position));
         continue;
@@ -534,8 +550,24 @@ export class InfraSceneRenderer {
       output.set(node.id, this.clampToBoundary(candidate));
     });
 
-    this.spreadOverlappingNodes(output, nodes);
+    this.spreadOverlappingNodes(output, floating);
     return output;
+  }
+
+  private getAnchorLayoutOffset(
+    nodes: RenderNodeView[],
+    kmlLayoutScale: number
+  ): Vector3 | null {
+    const anchorNode = nodes.find((node) => node.markerId === 0 && node.layoutOffsetMeters);
+    if (!anchorNode?.layoutOffsetMeters) {
+      return null;
+    }
+
+    return new Vector3(
+      anchorNode.layoutOffsetMeters.x * kmlLayoutScale,
+      anchorNode.layoutOffsetMeters.y * kmlLayoutScale,
+      anchorNode.layoutOffsetMeters.z * kmlLayoutScale
+    );
   }
 
   private spreadOverlappingNodes(
@@ -628,7 +660,7 @@ export class InfraSceneRenderer {
           )
         : MAX_KML_LAYOUT_RADIUS_NO_BOUNDARY;
 
-    return Math.min(1, targetRadius / maxRadius);
+    return Math.min(1, (targetRadius * this.kmlLayoutScaleMultiplier) / maxRadius);
   }
 
   private getPreferredCenter(): { x: number; z: number } {
@@ -674,7 +706,11 @@ export class InfraSceneRenderer {
     return clamped;
   }
 
-  private resolveNodeAnchor(node: RenderNodeView, kmlLayoutScale = 1): Vector3 | null {
+  private resolveNodeAnchor(
+    node: RenderNodeView,
+    kmlLayoutScale = 1,
+    anchorLayoutOffset: Vector3 | null = null
+  ): Vector3 | null {
     const markerAnchor = this.markerAnchors.get(node.markerId);
     if (markerAnchor) {
       return markerAnchor;
@@ -685,6 +721,9 @@ export class InfraSceneRenderer {
         node.layoutOffsetMeters.y * kmlLayoutScale,
         node.layoutOffsetMeters.z * kmlLayoutScale
       );
+      if (anchorLayoutOffset) {
+        this.tmpLayout.sub(anchorLayoutOffset);
+      }
       if (this.preferredSpawnRotation) {
         this.tmpLayout.applyQuaternion(this.preferredSpawnRotation);
       }

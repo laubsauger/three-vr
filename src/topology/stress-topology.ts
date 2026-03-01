@@ -11,7 +11,8 @@ export interface StressTopologyOptions {
 const NODE_TYPES: NodeType[] = ["tower", "backhaul", "router", "switch", "client"];
 const LINK_MEDIA: LinkMedium[] = ["wireless", "wired", "fiber"];
 const HEALTH_STATES: HealthState[] = ["up", "up", "up", "degraded", "down"];
-const KML_ANCHOR_SITE_PREFIX = "chowtower-rf-sector";
+const KML_LAYOUT_REFERENCE_SITE_NAME = "neocity-rf-seva";
+const KML_SPAWN_SITE_PREFIX = "chowtower-rf-sector";
 
 export function generateStressTopology(options: StressTopologyOptions = {}): TopologySnapshot {
   const now = Date.now();
@@ -20,9 +21,12 @@ export function generateStressTopology(options: StressTopologyOptions = {}): Top
     const network = parseKml(options.kmlText);
 
     if (network.sites.length > 0) {
-      const anchorSite =
+      const layoutReferenceSite =
+        network.sites.find((site) => site.name.toLowerCase() === KML_LAYOUT_REFERENCE_SITE_NAME) ??
+        network.sites[0];
+      const spawnAnchorSite =
         network.sites.find((site) =>
-          site.name.toLowerCase().startsWith(KML_ANCHOR_SITE_PREFIX)
+          site.name.toLowerCase().startsWith(KML_SPAWN_SITE_PREFIX)
         ) ??
         network.sites.find((site) => site.name.toLowerCase().includes("chowtower")) ??
         network.sites[0];
@@ -38,9 +42,9 @@ export function generateStressTopology(options: StressTopologyOptions = {}): Top
           .replace(/:[0-9a-fA-F]{2}$/i, "")
           .slice(0, 18);
         const localOffset = geoToLocal(site.lat, site.lon, site.alt, {
-          lat: anchorSite.lat,
-          lon: anchorSite.lon,
-          alt: anchorSite.alt
+          lat: layoutReferenceSite.lat,
+          lon: layoutReferenceSite.lon,
+          alt: layoutReferenceSite.alt
         });
 
         return {
@@ -83,7 +87,7 @@ export function generateStressTopology(options: StressTopologyOptions = {}): Top
 
         const pairKey = [fromNode.id, toNode.id].sort().join("-");
         if (usedPairs.has(pairKey)) continue;
-        usedPairs.has(pairKey);
+        usedPairs.add(pairKey);
 
         const medium = link.name.toLowerCase().includes("wireless") ? "wireless" : "fiber";
         const status = HEALTH_STATES[Math.floor(Math.random() * HEALTH_STATES.length)];
@@ -105,7 +109,7 @@ export function generateStressTopology(options: StressTopologyOptions = {}): Top
       }
 
       // Assign marker 0 to the chosen anchor site.
-      const anchorNodeId = nodes.find((node) => node.id === anchorSite.id)?.id ?? nodes[0].id;
+      const anchorNodeId = nodes.find((node) => node.id === spawnAnchorSite.id)?.id ?? nodes[0].id;
       const mappedNodes = nodes.map(n => {
         const { _coords, ...cleanNode } = n;
         if (cleanNode.id === anchorNodeId) {

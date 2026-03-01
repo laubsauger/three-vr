@@ -150,30 +150,30 @@ export async function bootstrapApp(): Promise<void> {
 
   const xrOverlayTopStack = document.createElement("div");
   xrOverlayTopStack.style.position = "absolute";
-  xrOverlayTopStack.style.top = "max(12px, env(safe-area-inset-top))";
-  xrOverlayTopStack.style.left = "12px";
-  xrOverlayTopStack.style.right = "12px";
+  xrOverlayTopStack.style.top = "max(8px, env(safe-area-inset-top))";
+  xrOverlayTopStack.style.left = "8px";
+  xrOverlayTopStack.style.right = "8px";
   xrOverlayTopStack.style.display = "grid";
-  xrOverlayTopStack.style.gap = "8px";
+  xrOverlayTopStack.style.gap = "6px";
   xrOverlayTopStack.style.pointerEvents = "none";
 
   const xrOverlayBar = document.createElement("div");
   xrOverlayBar.style.display = "flex";
   xrOverlayBar.style.alignItems = "center";
   xrOverlayBar.style.justifyContent = "space-between";
-  xrOverlayBar.style.gap = "12px";
-  xrOverlayBar.style.padding = "8px 10px";
-  xrOverlayBar.style.borderRadius = "12px";
-  xrOverlayBar.style.background = "rgba(5, 10, 13, 0.32)";
+  xrOverlayBar.style.gap = "8px";
+  xrOverlayBar.style.padding = "5px 7px";
+  xrOverlayBar.style.borderRadius = "10px";
+  xrOverlayBar.style.background = "rgba(5, 10, 13, 0.26)";
   xrOverlayBar.style.border = "1px solid rgba(84, 126, 138, 0.2)";
-  xrOverlayBar.style.backdropFilter = "blur(8px)";
+  xrOverlayBar.style.backdropFilter = "blur(6px)";
   xrOverlayBar.style.pointerEvents = "auto";
 
   const xrOverlayLabel = document.createElement("div");
   xrOverlayLabel.textContent = "AR session active";
-  xrOverlayLabel.style.fontSize = "12px";
+  xrOverlayLabel.style.fontSize = "11px";
   xrOverlayLabel.style.fontWeight = "700";
-  xrOverlayLabel.style.letterSpacing = "0.04em";
+  xrOverlayLabel.style.letterSpacing = "0.03em";
   xrOverlayLabel.style.color = "#dbe5e8";
 
   const xrOverlayStopButton = document.createElement("button");
@@ -184,11 +184,60 @@ export async function bootstrapApp(): Promise<void> {
     background: "#5a1f1f"
   });
   xrOverlayStopButton.style.minWidth = "0";
-  xrOverlayStopButton.style.minHeight = isVrUi ? "52px" : "40px";
-  xrOverlayStopButton.style.padding = isVrUi ? "12px 18px" : "9px 12px";
+  xrOverlayStopButton.style.minHeight = isVrUi ? "36px" : "34px";
+  xrOverlayStopButton.style.padding = isVrUi ? "6px 10px" : "7px 10px";
+  xrOverlayStopButton.style.fontSize = isVrUi ? "12px" : "12px";
+  xrOverlayStopButton.style.borderRadius = isVrUi ? "10px" : "10px";
 
   xrOverlayBar.append(xrOverlayLabel, xrOverlayStopButton);
-  xrOverlayTopStack.append(xrOverlayBar);
+  const xrLayoutControl = document.createElement("div");
+  xrLayoutControl.style.display = isVrUi ? "flex" : "none";
+  xrLayoutControl.style.alignItems = "center";
+  xrLayoutControl.style.gap = "6px";
+  xrLayoutControl.style.justifyContent = "center";
+  xrLayoutControl.style.padding = "4px 6px";
+  xrLayoutControl.style.borderRadius = "10px";
+  xrLayoutControl.style.background = "rgba(5, 10, 13, 0.22)";
+  xrLayoutControl.style.border = "1px solid rgba(84, 126, 138, 0.18)";
+  xrLayoutControl.style.backdropFilter = "blur(6px)";
+  xrLayoutControl.style.pointerEvents = "auto";
+
+  const applyOverlayMiniButtonStyle = (button: HTMLButtonElement): void => {
+    button.type = "button";
+    button.style.minWidth = "32px";
+    button.style.minHeight = "28px";
+    button.style.padding = "0";
+    button.style.borderRadius = "8px";
+    button.style.border = "1px solid rgba(84, 126, 138, 0.28)";
+    button.style.background = "rgba(11, 22, 28, 0.72)";
+    button.style.color = "#dbe5e8";
+    button.style.fontSize = "16px";
+    button.style.fontWeight = "700";
+    button.style.cursor = "pointer";
+    button.style.touchAction = "manipulation";
+    button.style.lineHeight = "1";
+  };
+
+  const xrLayoutDecreaseButton = document.createElement("button");
+  xrLayoutDecreaseButton.textContent = "-";
+  applyOverlayMiniButtonStyle(xrLayoutDecreaseButton);
+
+  const xrLayoutLabel = document.createElement("div");
+  xrLayoutLabel.style.minWidth = "96px";
+  xrLayoutLabel.style.fontFamily = metricFontFamily;
+  xrLayoutLabel.style.fontSize = "11px";
+  xrLayoutLabel.style.fontWeight = "700";
+  xrLayoutLabel.style.letterSpacing = "0.03em";
+  xrLayoutLabel.style.textAlign = "center";
+  xrLayoutLabel.style.color = "#dbe5e8";
+
+  const xrLayoutIncreaseButton = document.createElement("button");
+  xrLayoutIncreaseButton.textContent = "+";
+  applyOverlayMiniButtonStyle(xrLayoutIncreaseButton);
+
+  xrLayoutControl.append(xrLayoutDecreaseButton, xrLayoutLabel, xrLayoutIncreaseButton);
+
+  xrOverlayTopStack.append(xrOverlayBar, xrLayoutControl);
   xrOverlayRoot.append(xrOverlayTopStack);
 
   const createInfoCard = (
@@ -307,7 +356,7 @@ export async function bootstrapApp(): Promise<void> {
   applyCompactToggleStyle(xrEntryModeToggle);
 
   const filterBar = document.createElement("div");
-  filterBar.style.display = "flex";
+  filterBar.style.display = "none";
   filterBar.style.gap = isVrUi ? "8px" : "6px";
   filterBar.style.flexWrap = isVrUi ? "nowrap" : "wrap";
   filterBar.style.padding = isVrUi ? "6px 8px" : "6px 8px";
@@ -649,6 +698,45 @@ export async function bootstrapApp(): Promise<void> {
     });
   };
 
+  const XR_LAYOUT_SCALE_MIN = 1;
+  const XR_LAYOUT_SCALE_MAX = 6;
+  const XR_LAYOUT_SCALE_STEP = 0.25;
+  let phoneXrLayoutScale = 3.25;
+
+  const emitLayoutScale = (): void => {
+    events.emit("rendering/layout-scale", {
+      kmlScaleMultiplier: phoneXrLayoutScale,
+      timestampMs: performance.now()
+    });
+  };
+
+  const updateXrLayoutControl = (): void => {
+    xrLayoutLabel.textContent = `Spread ${phoneXrLayoutScale.toFixed(2)}x`;
+    xrLayoutDecreaseButton.disabled = phoneXrLayoutScale <= XR_LAYOUT_SCALE_MIN;
+    xrLayoutIncreaseButton.disabled = phoneXrLayoutScale >= XR_LAYOUT_SCALE_MAX;
+    xrLayoutDecreaseButton.style.opacity = xrLayoutDecreaseButton.disabled ? "0.42" : "1";
+    xrLayoutIncreaseButton.style.opacity = xrLayoutIncreaseButton.disabled ? "0.42" : "1";
+  };
+
+  const setPhoneXrLayoutScale = (next: number): void => {
+    const snapped = Math.round(next / XR_LAYOUT_SCALE_STEP) * XR_LAYOUT_SCALE_STEP;
+    const clamped = Math.min(XR_LAYOUT_SCALE_MAX, Math.max(XR_LAYOUT_SCALE_MIN, snapped));
+    if (Math.abs(clamped - phoneXrLayoutScale) < 0.001) {
+      return;
+    }
+    phoneXrLayoutScale = clamped;
+    updateXrLayoutControl();
+    emitLayoutScale();
+  };
+
+  xrLayoutDecreaseButton.addEventListener("click", () => {
+    setPhoneXrLayoutScale(phoneXrLayoutScale - XR_LAYOUT_SCALE_STEP);
+  });
+  xrLayoutIncreaseButton.addEventListener("click", () => {
+    setPhoneXrLayoutScale(phoneXrLayoutScale + XR_LAYOUT_SCALE_STEP);
+  });
+  updateXrLayoutControl();
+
   const setArStartDiagnostic = (
     path: string,
     detail: string,
@@ -822,10 +910,9 @@ export async function bootstrapApp(): Promise<void> {
   const startArSessionWithCameraAccessProbe = async (): Promise<void> => {
     const handheldReferenceSpaceOrder: XrReferenceSpaceType[] = [
       "local-floor",
-      "bounded-floor",
-      "unbounded",
       "local",
-      "viewer"
+      "unbounded",
+      "bounded-floor"
     ];
     const baseOptionalFeatures = [
       "local-floor",
@@ -1129,6 +1216,7 @@ export async function bootstrapApp(): Promise<void> {
     const details = error instanceof Error ? error.message : String(error);
     emitError("INTEGRATION_CONFLICT", `Failed to initialize integration agents: ${details}`, true);
   }
+  emitLayoutScale();
 
   capabilities = await xrRuntime.detectCapabilities();
   events.emit("xr/capabilities", {

@@ -6,7 +6,8 @@ type Handler<TPayload> = (payload: TPayload) => void;
 const REPLAYABLE_EVENTS: ReadonlySet<keyof AppEventMap> = new Set([
   "topology/snapshot",
   "xr/state",
-  "xr/capabilities"
+  "xr/capabilities",
+  "rendering/layout-scale"
 ]);
 
 export function createAppEventBus(): AppEventBus {

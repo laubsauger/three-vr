@@ -47,12 +47,14 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
   let unsubscribeHands: (() => void) | null = null;
   let unsubscribePinch: (() => void) | null = null;
   let unsubscribePoint: (() => void) | null = null;
+  let unsubscribeLayoutScale: (() => void) | null = null;
   let animationHandle = 0;
   let xrRunning = false;
   const isCoarsePointer = window.matchMedia("(pointer: coarse)").matches;
   let hasLockedSpawnAnchor = false;
   let hudDragHand: "left" | "right" | null = null;
   let currentGraph: RenderGraphView = { nodes: [], links: [] };
+  let phoneXrLayoutScale = 3.25;
 
   // Load KML if provided
   if (options.kmlText) {
@@ -105,6 +107,10 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
       resetHandHudState();
     }
   };
+  const applySpatialLayoutDensity = (): void => {
+    renderer.setKmlLayoutScaleMultiplier(xrRunning && isCoarsePointer ? phoneXrLayoutScale : 1);
+    refreshLabelLayout();
+  };
   const refreshLabelLayout = (): void => {
     if (currentGraph.nodes.length === 0 && currentGraph.links.length === 0) {
       return;
@@ -152,6 +158,7 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
   };
   applyHudLayout();
   applyPhoneXrHelperVisibility();
+  applySpatialLayoutDensity();
 
   return {
     async init(context: IntegrationContext): Promise<void> {
@@ -232,6 +239,7 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
           xrRunning = payload.state === "running";
           applyHudLayout();
           applyPhoneXrHelperVisibility();
+          applySpatialLayoutDensity();
           hudData.xrState = payload.state;
           if (payload.state === "running") {
             renderer.setBoundaryPolygon(context.xrRuntime.getBoundaryPolygon());
@@ -288,6 +296,11 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
 
         unsubscribeHover = context.events.on("interaction/hover", (payload) => {
           renderer.setHover(payload.kind, payload.id);
+        });
+
+        unsubscribeLayoutScale = context.events.on("rendering/layout-scale", (payload) => {
+          phoneXrLayoutScale = payload.kmlScaleMultiplier;
+          applySpatialLayoutDensity();
         });
 
         unsubscribeHands = context.events.on("interaction/hands", (payload) => {
@@ -378,6 +391,7 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
         }
         applyHudLayout();
         applyPhoneXrHelperVisibility();
+        applySpatialLayoutDensity();
 
         animationHandle = window.requestAnimationFrame(animate);
       } catch (error) {
@@ -440,6 +454,10 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
       if (unsubscribePoint) {
         unsubscribePoint();
         unsubscribePoint = null;
+      }
+      if (unsubscribeLayoutScale) {
+        unsubscribeLayoutScale();
+        unsubscribeLayoutScale = null;
       }
       if (animationHandle) {
         window.cancelAnimationFrame(animationHandle);

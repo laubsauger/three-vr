@@ -75,6 +75,11 @@ export interface SpawnAnchorEvent {
   timestampMs: number;
 }
 
+export interface RenderingLayoutScaleEvent {
+  kmlScaleMultiplier: number;
+  timestampMs: number;
+}
+
 export interface AppEventMap {
   "xr/state": {
     state: XrRuntimeState;
@@ -127,6 +132,7 @@ export interface AppEventMap {
     id: string | null;
     timestampMs: number;
   };
+  "rendering/layout-scale": RenderingLayoutScaleEvent;
   "app/performance": PerformanceSampleEvent;
   "app/error": AppErrorEnvelope;
 }
