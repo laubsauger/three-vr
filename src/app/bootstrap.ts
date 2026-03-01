@@ -77,14 +77,24 @@ export async function bootstrapApp(): Promise<void> {
   wrapper.style.gap = isVrUi ? "12px" : "10px";
 
   const toolbar = document.createElement("div");
-  toolbar.style.display = "flex";
-  toolbar.style.gap = isVrUi ? "8px" : "10px";
-  toolbar.style.flexWrap = "wrap";
+  toolbar.style.display = isVrUi ? "grid" : "flex";
+  toolbar.style.gap = isVrUi ? "6px" : "10px";
+  toolbar.style.flexWrap = isVrUi ? "nowrap" : "wrap";
   toolbar.style.padding = isVrUi ? "8px" : "8px";
   toolbar.style.borderRadius = "14px";
   toolbar.style.background = "rgba(7, 14, 18, 0.74)";
   toolbar.style.border = "1px solid rgba(84, 126, 138, 0.34)";
   toolbar.style.backdropFilter = "blur(10px)";
+
+  const toolbarPrimary = document.createElement("div");
+  toolbarPrimary.style.display = "flex";
+  toolbarPrimary.style.gap = isVrUi ? "6px" : "10px";
+  toolbarPrimary.style.flexWrap = "nowrap";
+
+  const toolbarSecondary = document.createElement("div");
+  toolbarSecondary.style.display = "flex";
+  toolbarSecondary.style.gap = isVrUi ? "6px" : "10px";
+  toolbarSecondary.style.flexWrap = "wrap";
 
   const applyControlButtonStyle = (
     button: HTMLButtonElement,
@@ -103,6 +113,17 @@ export async function bootstrapApp(): Promise<void> {
     button.style.touchAction = "manipulation";
     button.style.boxShadow = "inset 0 1px 0 rgba(255,255,255,0.06)";
     button.style.letterSpacing = "0.02em";
+  };
+  const applyCompactToggleStyle = (button: HTMLButtonElement): void => {
+    if (!isVrUi) {
+      return;
+    }
+    button.style.padding = "8px 10px";
+    button.style.minHeight = "38px";
+    button.style.minWidth = "0";
+    button.style.fontSize = "12px";
+    button.style.flex = "1 1 calc(50% - 3px)";
+    button.style.borderRadius = "10px";
   };
 
   const metricFontFamily =
@@ -254,6 +275,12 @@ export async function bootstrapApp(): Promise<void> {
     background: "#5a1f1f"
   });
   stopButton.style.opacity = "0.5";
+  if (isVrUi) {
+    startButton.style.flex = "1 1 auto";
+    startButton.style.minWidth = "0";
+    stopButton.style.minWidth = "116px";
+    stopButton.style.flex = "0 0 auto";
+  }
 
   const cameraTrackButton = document.createElement("button");
   cameraTrackButton.textContent = "Stop Camera Tracking";
@@ -261,6 +288,7 @@ export async function bootstrapApp(): Promise<void> {
     border: "1px solid #7a6a2a",
     background: "#5a4a1f"
   });
+  applyCompactToggleStyle(cameraTrackButton);
 
   const mockToggle = document.createElement("button");
   mockToggle.textContent = "Mode: Camera";
@@ -268,6 +296,7 @@ export async function bootstrapApp(): Promise<void> {
     border: "1px solid #4a4a6a",
     background: "#2a2a3f"
   });
+  applyCompactToggleStyle(mockToggle);
 
   const xrEntryModeToggle = document.createElement("button");
   applyControlButtonStyle(xrEntryModeToggle, {
@@ -275,6 +304,7 @@ export async function bootstrapApp(): Promise<void> {
     background: "#3f3520"
   });
   xrEntryModeToggle.style.minWidth = isVrUi ? "220px" : "0";
+  applyCompactToggleStyle(xrEntryModeToggle);
 
   const filterBar = document.createElement("div");
   filterBar.style.display = "flex";
@@ -335,6 +365,7 @@ export async function bootstrapApp(): Promise<void> {
     border: "1px solid #6a3a6a",
     background: "#3f1f3f",
   });
+  applyCompactToggleStyle(stressToggle);
 
   const stateLabel = document.createElement("div");
   stateLabel.style.fontSize = "14px";
@@ -518,7 +549,13 @@ export async function bootstrapApp(): Promise<void> {
     statusGrid.append(sessionCard.card, anchorCard.card, cameraCard.card, telemetryCard.card);
   }
 
-  toolbar.append(startButton, xrEntryModeToggle, stopButton, cameraTrackButton, mockToggle, stressToggle);
+  if (isVrUi) {
+    toolbarPrimary.append(startButton, stopButton);
+    toolbarSecondary.append(xrEntryModeToggle, cameraTrackButton, mockToggle, stressToggle);
+    toolbar.append(toolbarPrimary, toolbarSecondary);
+  } else {
+    toolbar.append(startButton, xrEntryModeToggle, stopButton, cameraTrackButton, mockToggle, stressToggle);
+  }
   xrOverlayTopStack.append(filterBar);
   wrapper.append(toolbar, statusGrid, canvasHolder);
   root.append(wrapper, xrOverlayRoot);
