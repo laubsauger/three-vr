@@ -71,7 +71,7 @@ export interface SpawnAnchorEvent {
   markerId: number | null;
   position: Vector3Like | null;
   rotation: QuaternionLike | null;
-  source: "desktop-prelock" | "xr-resolved" | "cleared";
+  source: "desktop-prelock" | "xr-resolved" | "viewer-fallback" | "cleared";
   timestampMs: number;
 }
 

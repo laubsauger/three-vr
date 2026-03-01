@@ -622,6 +622,8 @@ export async function bootstrapApp(): Promise<void> {
   const markerCalibration = new Map<number, MarkerCalibrationState>();
   let lockedSpawnAnchor: LockedSpawnAnchorState | null = null;
   let pendingXrSpawnAnchorResolve = false;
+  let pendingViewerSpawnAnchorResolve = false;
+  let usedViewerFallbackSpawnAnchor = false;
   let cameraPermissionState: CameraPermissionState = "unknown";
   let cameraPermissionStatus: PermissionStatus | null = null;
   let capabilities: XrCapabilities | null = null;
@@ -630,8 +632,6 @@ export async function bootstrapApp(): Promise<void> {
   const desktopCameraQuatInv = new Quaternion();
   const markerWorldPos = new Vector3();
   const markerWorldQuat = new Quaternion();
-  const resolvedSpawnPos = new Vector3();
-  const resolvedSpawnQuat = new Quaternion();
 
   const emitError = (
     code: AppErrorCode,
@@ -748,6 +748,8 @@ export async function bootstrapApp(): Promise<void> {
   const clearLockedSpawnAnchor = (timestampMs = performance.now()): void => {
     lockedSpawnAnchor = null;
     pendingXrSpawnAnchorResolve = false;
+    pendingViewerSpawnAnchorResolve = false;
+    usedViewerFallbackSpawnAnchor = false;
     spawnAnchorLabel.textContent = "Spawn anchor: waiting for stable marker";
     spawnAnchorLabel.style.color = "#dbe5e8";
     refreshStartButtonState();
@@ -762,12 +764,18 @@ export async function bootstrapApp(): Promise<void> {
 
   const publishLockedSpawnAnchor = (
     state: LockedSpawnAnchorState,
-    source: "desktop-prelock" | "xr-resolved",
+    source: "desktop-prelock" | "xr-resolved" | "viewer-fallback",
     timestampMs: number
   ): void => {
     lockedSpawnAnchor = state;
-    spawnAnchorLabel.textContent = `Spawn anchor: locked to ID ${state.markerId}`;
-    spawnAnchorLabel.style.color = "#7be2b1";
+    usedViewerFallbackSpawnAnchor = source === "viewer-fallback";
+    if (source === "viewer-fallback") {
+      spawnAnchorLabel.textContent = "Spawn anchor: viewer position (Chow Tower fallback)";
+      spawnAnchorLabel.style.color = "#7fd8cf";
+    } else {
+      spawnAnchorLabel.textContent = `Spawn anchor: locked to ID ${state.markerId}`;
+      spawnAnchorLabel.style.color = "#7be2b1";
+    }
     refreshStartButtonState();
     events.emit("tracking/spawn-anchor", {
       markerId: state.markerId,
@@ -1029,9 +1037,8 @@ export async function bootstrapApp(): Promise<void> {
       xrEntryMode === "prelock" &&
       !lockedSpawnAnchor
     ) {
-      enabled = false;
-      label = "Lock Marker to Start AR";
-      hint = "Hold a stable marker in view until the spawn anchor locks.";
+      label = "Start AR (Use Viewer as Chow Tower)";
+      hint = "Without a stable marker lock, the current XR viewer position will become the Chow Tower anchor.";
     } else if (switchableDetector.getMode() === "camera" && xrEntryMode === "prelock") {
       label = "Start AR (Marker Locked)";
       hint = "Marker lock acquired. Ready to enter AR.";
@@ -1307,11 +1314,10 @@ export async function bootstrapApp(): Promise<void> {
     if (pendingXrSpawnAnchorResolve && lockedSpawnAnchor) {
       const viewer = resolveViewerTransform(tick.frame, tick.referenceSpace);
       if (viewer) {
-        resolvedSpawnPos.copy(lockedSpawnAnchor.relativePosition).applyQuaternion(viewer.rotation).add(viewer.position);
-        resolvedSpawnQuat.copy(viewer.rotation).multiply(lockedSpawnAnchor.relativeRotation);
-        const floorAlignedAnchor = alignSpawnAnchorToFloor(
-          resolvedSpawnPos,
-          resolvedSpawnQuat,
+        const floorAlignedAnchor = resolveLockedSpawnAnchorInXr(
+          lockedSpawnAnchor,
+          viewer.position,
+          viewer.rotation,
           xrRuntime.getReferenceSpaceType()
         );
         publishLockedSpawnAnchor(
@@ -1324,6 +1330,28 @@ export async function bootstrapApp(): Promise<void> {
           tick.time
         );
         pendingXrSpawnAnchorResolve = false;
+      }
+    }
+    if (pendingViewerSpawnAnchorResolve) {
+      const viewer = resolveViewerTransform(tick.frame, tick.referenceSpace);
+      if (viewer) {
+        const viewerFallbackAnchor = alignSpawnAnchorToFloor(
+          viewer.position,
+          viewer.rotation,
+          xrRuntime.getReferenceSpaceType()
+        );
+        publishLockedSpawnAnchor(
+          {
+            markerId: 0,
+            worldPosition: viewerFallbackAnchor.position,
+            worldRotation: viewerFallbackAnchor.rotation,
+            relativePosition: new Vector3(),
+            relativeRotation: new Quaternion()
+          },
+          "viewer-fallback",
+          tick.time
+        );
+        pendingViewerSpawnAnchorResolve = false;
       }
     }
     events.emit("xr/frame", tick);
@@ -1517,15 +1545,12 @@ export async function bootstrapApp(): Promise<void> {
 
       if (switchableDetector.getMode() === "camera" && xrEntryMode === "prelock" && !lockedSpawnAnchor) {
         setArStartDiagnostic(
-          "blocked by prelock",
-          "This path requires a stable marker lock before entering XR.",
-          { error: true }
+          "prelock fallback",
+          "No stable marker lock is present. The first XR frame will use the viewer position as the Chow Tower anchor."
         );
-        spawnAnchorLabel.textContent = "Spawn anchor: lock a stable marker before starting AR";
+        spawnAnchorLabel.textContent = "Spawn anchor: viewer fallback pending";
         spawnAnchorLabel.style.color = "#ffd27b";
-        frameStats.textContent = "Waiting for a stable ArUco lock before starting AR.";
-        setState();
-        return;
+        frameStats.textContent = "Starting AR without a marker lock. Viewer position will become Chow Tower.";
       }
 
       if (switchableDetector.getMode() === "camera" && xrEntryMode === "passthrough") {
@@ -1545,6 +1570,7 @@ export async function bootstrapApp(): Promise<void> {
       }
 
       pendingXrSpawnAnchorResolve = xrEntryMode === "prelock" && Boolean(lockedSpawnAnchor);
+      pendingViewerSpawnAnchorResolve = xrEntryMode === "prelock" && !lockedSpawnAnchor;
       await startArSessionWithCameraAccessProbe();
       applyImmersiveOverlayLayout();
       scene.background = null;
@@ -1559,6 +1585,8 @@ export async function bootstrapApp(): Promise<void> {
         switchableDetector.camera.setInlineCameraEnabled(true);
         cameraStatsLabel.textContent = "Camera: restoring inline scan after XR start failure";
       }
+      pendingXrSpawnAnchorResolve = false;
+      pendingViewerSpawnAnchorResolve = false;
       const details = error instanceof Error ? error.message : String(error);
       setArStartDiagnostic("start button handler failed", details, { error: true });
       emitError("XR_SESSION_START_FAILED", `Failed to start XR session: ${details}`, true, {
@@ -1577,11 +1605,16 @@ export async function bootstrapApp(): Promise<void> {
       }
 
       await xrRuntime.stop();
+      pendingXrSpawnAnchorResolve = false;
+      pendingViewerSpawnAnchorResolve = false;
       if (shouldReleaseInlineCameraForMobileXr()) {
         switchableDetector.camera.setInlineCameraEnabled(true);
         if (desktopTrackingActive && switchableDetector.getMode() === "camera") {
           cameraStatsLabel.textContent = "Camera: resuming inline scan";
         }
+      }
+      if (usedViewerFallbackSpawnAnchor) {
+        clearLockedSpawnAnchor();
       }
       restoreImmersiveOverlayLayout();
       scene.background = defaultBackground;
@@ -1881,17 +1914,7 @@ function alignSpawnAnchorToFloor(
   rotation: Quaternion,
   referenceSpaceType: XrReferenceSpaceType | null
 ): { position: Vector3; rotation: Quaternion } {
-  const forward = new Vector3(0, 0, -1).applyQuaternion(rotation);
-  forward.y = 0;
-
-  const alignedRotation = new Quaternion();
-  if (forward.lengthSq() > 1e-6) {
-    forward.normalize();
-    const yaw = Math.atan2(forward.x, -forward.z);
-    alignedRotation.setFromAxisAngle(new Vector3(0, 1, 0), yaw);
-  } else {
-    alignedRotation.identity();
-  }
+  const alignedRotation = extractYawOnlyRotation(rotation);
 
   const alignedPosition = position.clone();
   if (referenceSpaceType === "local-floor" || referenceSpaceType === "bounded-floor") {
@@ -1902,4 +1925,37 @@ function alignSpawnAnchorToFloor(
     position: alignedPosition,
     rotation: alignedRotation
   };
+}
+
+function resolveLockedSpawnAnchorInXr(
+  state: LockedSpawnAnchorState,
+  viewerPosition: Vector3,
+  viewerRotation: Quaternion,
+  referenceSpaceType: XrReferenceSpaceType | null
+): { position: Vector3; rotation: Quaternion } {
+  const yawOnlyViewerRotation = extractYawOnlyRotation(viewerRotation);
+  const resolvedPosition = state.relativePosition.clone().applyQuaternion(yawOnlyViewerRotation);
+  if (referenceSpaceType === "local-floor" || referenceSpaceType === "bounded-floor") {
+    resolvedPosition.y = 0;
+  }
+  resolvedPosition.add(viewerPosition);
+
+  const resolvedRotation = yawOnlyViewerRotation.clone().multiply(state.relativeRotation);
+  return alignSpawnAnchorToFloor(resolvedPosition, resolvedRotation, referenceSpaceType);
+}
+
+function extractYawOnlyRotation(rotation: Quaternion): Quaternion {
+  const forward = new Vector3(0, 0, -1).applyQuaternion(rotation);
+  forward.y = 0;
+
+  const yawOnlyRotation = new Quaternion();
+  if (forward.lengthSq() > 1e-6) {
+    forward.normalize();
+    const yaw = Math.atan2(forward.x, -forward.z);
+    yawOnlyRotation.setFromAxisAngle(new Vector3(0, 1, 0), yaw);
+    return yawOnlyRotation;
+  }
+
+  yawOnlyRotation.identity();
+  return yawOnlyRotation;
 }
