@@ -42,6 +42,9 @@ const SELECTED_HIGHLIGHT_HEX = 0x5cf2ff;
 const HOVER_HIGHLIGHT_HEX = 0x8feaff;
 const MIN_NODE_SCALE_FACTOR = 0.84;
 const MAX_NODE_SCALE_FACTOR = 1.28;
+const OVERLAP_KEY_PRECISION = 50;
+const OVERLAP_SPREAD_RADIUS = 0.08;
+const OVERLAP_SPREAD_RING_GAP = 0.055;
 
 interface LinkVisualState {
   group: Group;
@@ -531,7 +534,69 @@ export class InfraSceneRenderer {
       output.set(node.id, this.clampToBoundary(candidate));
     });
 
+    this.spreadOverlappingNodes(output, nodes);
     return output;
+  }
+
+  private spreadOverlappingNodes(
+    positions: Map<string, Vector3>,
+    nodes: RenderNodeView[]
+  ): void {
+    const groups = new Map<string, RenderNodeView[]>();
+
+    for (const node of nodes) {
+      const position = positions.get(node.id);
+      if (!position) {
+        continue;
+      }
+      const key = [
+        Math.round(position.x * OVERLAP_KEY_PRECISION),
+        Math.round(position.y * OVERLAP_KEY_PRECISION),
+        Math.round(position.z * OVERLAP_KEY_PRECISION)
+      ].join(":");
+      const group = groups.get(key);
+      if (group) {
+        group.push(node);
+      } else {
+        groups.set(key, [node]);
+      }
+    }
+
+    for (const group of groups.values()) {
+      if (group.length < 2) {
+        continue;
+      }
+
+      const anchorIndex = group.findIndex((node) => node.markerId === 0);
+      const centerIndex = anchorIndex >= 0 ? anchorIndex : 0;
+      const centerNode = group[centerIndex];
+      const center = positions.get(centerNode.id);
+      if (!center) {
+        continue;
+      }
+
+      let offsetIndex = 0;
+      for (let i = 0; i < group.length; i++) {
+        if (i === centerIndex) {
+          positions.set(group[i].id, center.clone());
+          continue;
+        }
+
+        const ring = Math.floor(offsetIndex / 6);
+        const slot = offsetIndex % 6;
+        const radius = OVERLAP_SPREAD_RADIUS + ring * OVERLAP_SPREAD_RING_GAP;
+        const angle = (slot / 6) * Math.PI * 2;
+        const offsetPosition = center.clone().add(
+          new Vector3(
+            Math.cos(angle) * radius,
+            0.018 * (ring + 1),
+            Math.sin(angle) * radius
+          )
+        );
+        positions.set(group[i].id, this.clampToBoundary(offsetPosition));
+        offsetIndex += 1;
+      }
+    }
   }
 
   private getKmlLayoutScale(nodes: RenderNodeView[]): number {

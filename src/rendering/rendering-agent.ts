@@ -1,7 +1,7 @@
 import { Camera, Quaternion, Scene, Vector3, WebGLRenderer } from "three";
 
 import type { IntegrationContext, RenderingAgent } from "../contracts/integration";
-import { selectRenderGraphView } from "../topology";
+import { selectRenderGraphView, type RenderGraphView } from "../topology";
 import { InfraSceneRenderer } from "./scene-renderer";
 import { KmlMapRenderer, parseKml } from "../kml";
 import { MarkerIndicatorManager } from "./marker-indicator";
@@ -52,6 +52,7 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
   const isCoarsePointer = window.matchMedia("(pointer: coarse)").matches;
   let hasLockedSpawnAnchor = false;
   let hudDragHand: "left" | "right" | null = null;
+  let currentGraph: RenderGraphView = { nodes: [], links: [] };
 
   // Load KML if provided
   if (options.kmlText) {
@@ -104,6 +105,13 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
       resetHandHudState();
     }
   };
+  const refreshLabelLayout = (): void => {
+    if (currentGraph.nodes.length === 0 && currentGraph.links.length === 0) {
+      return;
+    }
+    labelManager.updateGraph(currentGraph, renderer.getNodePositions(), renderer.getLinkMidpoints());
+    labelManager.updateVisibility(getViewCamera());
+  };
 
   // Debug HUD state
   const hudData: DebugHudData = {
@@ -149,18 +157,14 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
     async init(context: IntegrationContext): Promise<void> {
       try {
         unsubscribeTopology = context.events.on("topology/snapshot", (payload) => {
-          const graph = selectRenderGraphView(payload.snapshot);
-          renderer.updateGraph(graph);
-
-          // Update labels with resolved positions
-          const nodePositions = renderer.getNodePositions();
-          const linkMidpoints = renderer.getLinkMidpoints();
-          labelManager.updateGraph(graph, nodePositions, linkMidpoints);
-          labelManager.updateVisibility(getViewCamera());
+          currentGraph = selectRenderGraphView(payload.snapshot);
+          renderer.updateGraph(currentGraph);
+          refreshLabelLayout();
         });
 
         unsubscribeMarkers = context.events.on("tracking/markers", (payload) => {
           renderer.updateTrackedMarkers(payload.markers);
+          refreshLabelLayout();
           markerIndicators.update(payload.markers, payload.timestampMs);
 
           // Update HUD marker data
@@ -204,6 +208,7 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
           if (!payload.position || !payload.rotation) {
             hasLockedSpawnAnchor = false;
             renderer.setPreferredSpawnAnchor(null, null);
+            refreshLabelLayout();
             return;
           }
 
@@ -216,6 +221,7 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
           );
           hasLockedSpawnAnchor = true;
           renderer.setPreferredSpawnAnchor(lockedSpawnPos, lockedSpawnQuat);
+          refreshLabelLayout();
 
           if (kmlMap.isLoaded()) {
             kmlMap.anchorToMarker(lockedSpawnPos, lockedSpawnQuat);
@@ -229,6 +235,7 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
           hudData.xrState = payload.state;
           if (payload.state === "running") {
             renderer.setBoundaryPolygon(context.xrRuntime.getBoundaryPolygon());
+            refreshLabelLayout();
             // Set camera warning if detector is not ready when entering XR
             if (hudData.trackingBackend === "camera-worker" && hudData.detectorStatus !== "ready") {
               hudData.cameraWarning = hudData.detectorStatus === "failed"
@@ -237,6 +244,7 @@ export function createRenderingAgent(options: RenderingAgentOptions): RenderingA
             }
           } else {
             renderer.setBoundaryPolygon(null);
+            refreshLabelLayout();
             hudData.cameraWarning = null;
           }
         });

@@ -11,7 +11,7 @@ export interface StressTopologyOptions {
 const NODE_TYPES: NodeType[] = ["tower", "backhaul", "router", "switch", "client"];
 const LINK_MEDIA: LinkMedium[] = ["wireless", "wired", "fiber"];
 const HEALTH_STATES: HealthState[] = ["up", "up", "up", "degraded", "down"];
-const KML_ANCHOR_SITE_NAME = "neocity-rf-seva";
+const KML_ANCHOR_SITE_PREFIX = "chowtower-rf-sector";
 
 export function generateStressTopology(options: StressTopologyOptions = {}): TopologySnapshot {
   const now = Date.now();
@@ -20,7 +20,12 @@ export function generateStressTopology(options: StressTopologyOptions = {}): Top
     const network = parseKml(options.kmlText);
 
     if (network.sites.length > 0) {
-      const anchorSite = network.sites.find((site) => site.name === KML_ANCHOR_SITE_NAME) ?? network.sites[0];
+      const anchorSite =
+        network.sites.find((site) =>
+          site.name.toLowerCase().startsWith(KML_ANCHOR_SITE_PREFIX)
+        ) ??
+        network.sites.find((site) => site.name.toLowerCase().includes("chowtower")) ??
+        network.sites[0];
       // Create basic nodes
       const nodes = network.sites.map((site, i) => {
         const type = site.name.toLowerCase().includes("tower") ? "tower" : (site.name.toLowerCase().includes("switch") ? "switch" : "router");

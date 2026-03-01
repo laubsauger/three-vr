@@ -78,9 +78,9 @@ export async function bootstrapApp(): Promise<void> {
 
   const toolbar = document.createElement("div");
   toolbar.style.display = "flex";
-  toolbar.style.gap = isVrUi ? "12px" : "10px";
+  toolbar.style.gap = isVrUi ? "8px" : "10px";
   toolbar.style.flexWrap = "wrap";
-  toolbar.style.padding = isVrUi ? "10px" : "8px";
+  toolbar.style.padding = isVrUi ? "8px" : "8px";
   toolbar.style.borderRadius = "14px";
   toolbar.style.background = "rgba(7, 14, 18, 0.74)";
   toolbar.style.border = "1px solid rgba(84, 126, 138, 0.34)";
@@ -90,10 +90,10 @@ export async function bootstrapApp(): Promise<void> {
     button: HTMLButtonElement,
     options: { border: string; background: string; emphasis?: boolean }
   ): void => {
-    button.style.padding = isVrUi ? "16px 22px" : (options.emphasis ? "12px 18px" : "10px 14px");
-    button.style.minHeight = isVrUi ? "64px" : (options.emphasis ? "46px" : "42px");
-    button.style.minWidth = isVrUi ? (options.emphasis ? "248px" : "182px") : (options.emphasis ? "168px" : "138px");
-    button.style.fontSize = isVrUi ? (options.emphasis ? "19px" : "16px") : (options.emphasis ? "15px" : "13px");
+    button.style.padding = isVrUi ? "12px 16px" : (options.emphasis ? "12px 18px" : "10px 14px");
+    button.style.minHeight = isVrUi ? "52px" : (options.emphasis ? "46px" : "42px");
+    button.style.minWidth = isVrUi ? (options.emphasis ? "196px" : "148px") : (options.emphasis ? "168px" : "138px");
+    button.style.fontSize = isVrUi ? (options.emphasis ? "17px" : "14px") : (options.emphasis ? "15px" : "13px");
     button.style.fontWeight = options.emphasis ? "700" : "600";
     button.style.borderRadius = isVrUi ? "14px" : "10px";
     button.style.border = options.border;
@@ -127,11 +127,16 @@ export async function bootstrapApp(): Promise<void> {
   xrOverlayRoot.style.background = "transparent";
   xrOverlayRoot.style.zIndex = "2000";
 
+  const xrOverlayTopStack = document.createElement("div");
+  xrOverlayTopStack.style.position = "absolute";
+  xrOverlayTopStack.style.top = "max(12px, env(safe-area-inset-top))";
+  xrOverlayTopStack.style.left = "12px";
+  xrOverlayTopStack.style.right = "12px";
+  xrOverlayTopStack.style.display = "grid";
+  xrOverlayTopStack.style.gap = "8px";
+  xrOverlayTopStack.style.pointerEvents = "none";
+
   const xrOverlayBar = document.createElement("div");
-  xrOverlayBar.style.position = "absolute";
-  xrOverlayBar.style.top = "max(12px, env(safe-area-inset-top))";
-  xrOverlayBar.style.left = "12px";
-  xrOverlayBar.style.right = "12px";
   xrOverlayBar.style.display = "flex";
   xrOverlayBar.style.alignItems = "center";
   xrOverlayBar.style.justifyContent = "space-between";
@@ -162,7 +167,8 @@ export async function bootstrapApp(): Promise<void> {
   xrOverlayStopButton.style.padding = isVrUi ? "12px 18px" : "9px 12px";
 
   xrOverlayBar.append(xrOverlayLabel, xrOverlayStopButton);
-  xrOverlayRoot.append(xrOverlayBar);
+  xrOverlayTopStack.append(xrOverlayBar);
+  xrOverlayRoot.append(xrOverlayTopStack);
 
   const createInfoCard = (
     title: string,
@@ -272,12 +278,16 @@ export async function bootstrapApp(): Promise<void> {
 
   const filterBar = document.createElement("div");
   filterBar.style.display = "flex";
-  filterBar.style.gap = isVrUi ? "10px" : "6px";
-  filterBar.style.flexWrap = "wrap";
-  filterBar.style.padding = isVrUi ? "8px 10px" : "6px 8px";
+  filterBar.style.gap = isVrUi ? "8px" : "6px";
+  filterBar.style.flexWrap = isVrUi ? "nowrap" : "wrap";
+  filterBar.style.padding = isVrUi ? "6px 8px" : "6px 8px";
   filterBar.style.borderRadius = "12px";
-  filterBar.style.background = "rgba(10, 18, 22, 0.56)";
+  filterBar.style.background = "rgba(7, 14, 18, 0.54)";
   filterBar.style.border = "1px solid rgba(62, 88, 96, 0.26)";
+  filterBar.style.pointerEvents = "auto";
+  filterBar.style.overflowX = isVrUi ? "auto" : "visible";
+  filterBar.style.overflowY = "hidden";
+  filterBar.style.setProperty("-webkit-overflow-scrolling", "touch");
 
   const filterModes: { label: string; mode: TopologyFilterMode }[] = [
     { label: "All", mode: "all" },
@@ -502,10 +512,15 @@ export async function bootstrapApp(): Promise<void> {
   cameraCard.body.append(cameraStatsLabel, cameraPermissionLabel, xrCameraAccessLabel, cameraPiPLabel, cameraPiPCanvas);
   telemetryCard.body.append(topologyStatsLabel, telemetryStatsLabel, capabilitiesLabel);
 
-  statusGrid.append(sessionCard.card, anchorCard.card, cameraCard.card, telemetryCard.card);
+  if (isVrUi) {
+    statusGrid.append(cameraCard.card, sessionCard.card, anchorCard.card, telemetryCard.card);
+  } else {
+    statusGrid.append(sessionCard.card, anchorCard.card, cameraCard.card, telemetryCard.card);
+  }
 
   toolbar.append(startButton, xrEntryModeToggle, stopButton, cameraTrackButton, mockToggle, stressToggle);
-  wrapper.append(toolbar, filterBar, statusGrid, canvasHolder);
+  xrOverlayTopStack.append(filterBar);
+  wrapper.append(toolbar, statusGrid, canvasHolder);
   root.append(wrapper, xrOverlayRoot);
 
   const scene = new Scene();
@@ -761,10 +776,10 @@ export async function bootstrapApp(): Promise<void> {
 
   const startArSessionWithCameraAccessProbe = async (): Promise<void> => {
     const handheldReferenceSpaceOrder: XrReferenceSpaceType[] = [
-      "local",
       "local-floor",
       "bounded-floor",
       "unbounded",
+      "local",
       "viewer"
     ];
     const baseOptionalFeatures = [
@@ -1257,11 +1272,16 @@ export async function bootstrapApp(): Promise<void> {
       if (viewer) {
         resolvedSpawnPos.copy(lockedSpawnAnchor.relativePosition).applyQuaternion(viewer.rotation).add(viewer.position);
         resolvedSpawnQuat.copy(viewer.rotation).multiply(lockedSpawnAnchor.relativeRotation);
+        const floorAlignedAnchor = alignSpawnAnchorToFloor(
+          resolvedSpawnPos,
+          resolvedSpawnQuat,
+          xrRuntime.getReferenceSpaceType()
+        );
         publishLockedSpawnAnchor(
           {
             ...lockedSpawnAnchor,
-            worldPosition: resolvedSpawnPos.clone(),
-            worldRotation: resolvedSpawnQuat.clone()
+            worldPosition: floorAlignedAnchor.position,
+            worldRotation: floorAlignedAnchor.rotation
           },
           "xr-resolved",
           tick.time
@@ -1816,5 +1836,33 @@ function resolveViewerTransform(
   return {
     position: new Vector3(position.x, position.y, position.z),
     rotation: new Quaternion(orientation.x, orientation.y, orientation.z, orientation.w)
+  };
+}
+
+function alignSpawnAnchorToFloor(
+  position: Vector3,
+  rotation: Quaternion,
+  referenceSpaceType: XrReferenceSpaceType | null
+): { position: Vector3; rotation: Quaternion } {
+  const forward = new Vector3(0, 0, -1).applyQuaternion(rotation);
+  forward.y = 0;
+
+  const alignedRotation = new Quaternion();
+  if (forward.lengthSq() > 1e-6) {
+    forward.normalize();
+    const yaw = Math.atan2(forward.x, -forward.z);
+    alignedRotation.setFromAxisAngle(new Vector3(0, 1, 0), yaw);
+  } else {
+    alignedRotation.identity();
+  }
+
+  const alignedPosition = position.clone();
+  if (referenceSpaceType === "local-floor" || referenceSpaceType === "bounded-floor") {
+    alignedPosition.y = 0;
+  }
+
+  return {
+    position: alignedPosition,
+    rotation: alignedRotation
   };
 }
